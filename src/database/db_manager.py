@@ -181,6 +181,77 @@ class DatabaseManager:
             logger.debug(f"Registro inserido com ID: {record_id}")
             return record_id
     
+    def insert_records_batch(self, records: List[PortabilidadeRecord]) -> List[int]:
+        """
+        Insere múltiplos registros em lote (otimização de performance)
+        
+        Args:
+            records: Lista de registros de portabilidade
+            
+        Returns:
+            Lista de IDs dos registros inseridos
+        """
+        if not records:
+            return []
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            record_ids = []
+            
+            # Preparar dados em lote
+            batch_data = []
+            for record in records:
+                data = record.to_dict()
+                batch_data.append((
+                    data['cpf'], data['numero_acesso'], data['numero_ordem'],
+                    data['codigo_externo'], data['numero_temporario'],
+                    data['bilhete_temporario'], data['numero_bilhete'],
+                    data['status_bilhete'], data['operadora_doadora'],
+                    data['data_portabilidade'], data['motivo_recusa'],
+                    data['motivo_cancelamento'], data['ultimo_bilhete'],
+                    data['status_ordem'], data['preco_ordem'],
+                    data['data_conclusao_ordem'], data['motivo_nao_consultado'],
+                    data['motivo_nao_cancelado'], data['motivo_nao_aberto'],
+                    data['motivo_nao_reagendado'], data['novo_status_bilhete'],
+                    data['nova_data_portabilidade'], data['responsavel_processamento'],
+                    data['data_inicial_processamento'], data['data_final_processamento'],
+                    data['registro_valido'], data['ajustes_registro'],
+                    data['numero_acesso_valido'], data['ajustes_numero_acesso']
+                ))
+            
+            # Executar inserção em lote
+            cursor.executemany("""
+                INSERT OR REPLACE INTO portabilidade_records (
+                    cpf, numero_acesso, numero_ordem, codigo_externo,
+                    numero_temporario, bilhete_temporario, numero_bilhete,
+                    status_bilhete, operadora_doadora, data_portabilidade,
+                    motivo_recusa, motivo_cancelamento, ultimo_bilhete,
+                    status_ordem, preco_ordem, data_conclusao_ordem,
+                    motivo_nao_consultado, motivo_nao_cancelado,
+                    motivo_nao_aberto, motivo_nao_reagendado,
+                    novo_status_bilhete, nova_data_portabilidade,
+                    responsavel_processamento, data_inicial_processamento,
+                    data_final_processamento, registro_valido,
+                    ajustes_registro, numero_acesso_valido, ajustes_numero_acesso
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, batch_data)
+            
+            conn.commit()
+            
+            # Buscar IDs inseridos (usando os campos únicos)
+            record_ids = []
+            for record in records:
+                cursor.execute("""
+                    SELECT id FROM portabilidade_records
+                    WHERE cpf = ? AND numero_acesso = ? AND numero_ordem = ?
+                """, (record.cpf, record.numero_acesso, record.numero_ordem))
+                row = cursor.fetchone()
+                if row:
+                    record_ids.append(row[0])
+            
+            logger.debug(f"Inseridos {len(records)} registros em lote")
+            return record_ids
+    
     def get_record(self, cpf: str, numero_acesso: str, numero_ordem: str) -> Optional[Dict[str, Any]]:
         """
         Busca um registro específico

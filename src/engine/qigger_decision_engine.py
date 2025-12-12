@@ -70,17 +70,23 @@ class QiggerDecisionEngine:
             'rule_23_priorizar_ultimo_bilhete': self._rule_23_priorizar_ultimo_bilhete,
         }
     
-    def process_record(self, record: PortabilidadeRecord) -> List[DecisionResult]:
+    def process_record(self, record: PortabilidadeRecord, save_to_db: bool = True) -> List[DecisionResult]:
         """
         Processa um registro aplicando todas as regras relevantes
         
         Args:
             record: Registro de portabilidade a ser processado
+            save_to_db: Se True, salva no banco de dados (otimização para processamento em lote)
             
         Returns:
             Lista de resultados de decisão
         """
         results = []
+        record_id = None
+        
+        # Inserir registro no banco apenas uma vez se necessário
+        if save_to_db and self.db_manager:
+            record_id = self.db_manager.insert_record(record)
         
         for rule_name, rule_func in self.rules_registry.items():
             try:
@@ -93,9 +99,7 @@ class QiggerDecisionEngine:
                     results.append(result)
                     
                     # Log no banco de dados se disponível
-                    if self.db_manager:
-                        # Primeiro, inserir o registro se necessário
-                        record_id = self.db_manager.insert_record(record)
+                    if save_to_db and self.db_manager and record_id:
                         self.db_manager.log_rule_execution(
                             record_id, rule_name, result.decision, execution_time
                         )
@@ -109,6 +113,50 @@ class QiggerDecisionEngine:
         results.sort(key=lambda x: x.priority)
         
         return results
+    
+    def process_records_batch(self, records: List[PortabilidadeRecord]) -> Dict[PortabilidadeRecord, List[DecisionResult]]:
+        """
+        Processa múltiplos registros de forma otimizada
+        
+        Args:
+            records: Lista de registros a serem processados
+            
+        Returns:
+            Dicionário mapeando cada registro aos seus resultados
+        """
+        results_map = {}
+        
+        # Processar todos os registros (sem salvar no DB ainda)
+        for record in records:
+            results_map[record] = self.process_record(record, save_to_db=False)
+        
+        # Inserir todos os registros em lote no banco
+        if self.db_manager:
+            try:
+                record_ids = self.db_manager.insert_records_batch(records)
+                
+                # Agora logar as decisões
+                for i, (record, results) in enumerate(results_map.items()):
+                    if i < len(record_ids):
+                        record_id = record_ids[i]
+                        for result in results:
+                            self.db_manager.log_rule_execution(
+                                record_id, result.rule_name, result.decision, result.execution_time_ms
+                            )
+                            self.db_manager.log_decision(
+                                record_id, result.rule_name, result.decision, result.details
+                            )
+            except Exception as e:
+                logger.error(f"Erro ao salvar lote no banco: {e}")
+                # Fallback: salvar individualmente
+                for record, results in results_map.items():
+                    record_id = self.db_manager.insert_record(record)
+                    for result in results:
+                        self.db_manager.log_rule_execution(
+                            record_id, result.rule_name, result.decision, result.execution_time_ms
+                        )
+        
+        return results_map
     
     # ========== REGRAS DE VALIDAÇÃO ==========
     

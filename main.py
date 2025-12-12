@@ -14,6 +14,10 @@ from src.utils import CSVParser
 from src.models.portabilidade import PortabilidadeRecord
 from src.monitor import FolderMonitor
 
+# Configurar encoding UTF-8 para o console no Windows
+from src.utils.console_utils import setup_windows_console
+setup_windows_console()
+
 # Configurar logging
 import io
 import sys
@@ -21,7 +25,11 @@ import sys
 # Configurar encoding UTF-8 para o console no Windows
 if sys.platform == 'win32':
     # Criar handler com encoding UTF-8
-    console_handler = logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace'))
+    try:
+        console_handler = logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace'))
+    except Exception:
+        # Fallback para handler padrão
+        console_handler = logging.StreamHandler(sys.stdout)
 else:
     console_handler = logging.StreamHandler(sys.stdout)
 
@@ -37,14 +45,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def process_csv_file(csv_path: str, db_path: str = "data/portabilidade.db"):
+def process_csv_file(
+    csv_path: str, 
+    db_path: str = "data/portabilidade.db",
+    processed_folder: str = None,
+    verbose: bool = False,
+    batch_size: int = 100
+):
     """
-    Processa um arquivo CSV completo
+    Processa um arquivo CSV completo com otimizações de performance
     
     Args:
         csv_path: Caminho para o arquivo CSV
         db_path: Caminho para o banco de dados
+        processed_folder: Pasta para mover arquivo após processamento (opcional)
+        verbose: Exibir logs detalhados de cada registro
+        batch_size: Tamanho do lote para processamento em batch
     """
+    import shutil
+    from pathlib import Path
+    from datetime import datetime
+    
     logger.info(f"Iniciando processamento do arquivo: {csv_path}")
     
     # Inicializar componentes
@@ -59,35 +80,91 @@ def process_csv_file(csv_path: str, db_path: str = "data/portabilidade.db"):
         logger.error(f"Erro ao parsear CSV: {e}")
         return
     
-    # Processar cada registro
+    # Processar registros em lotes para melhor performance
     total_processed = 0
     total_errors = 0
+    csv_path_obj = Path(csv_path)
     
-    for i, record in enumerate(records, 1):
+    # Processar em lotes
+    for batch_start in range(0, len(records), batch_size):
+        batch_end = min(batch_start + batch_size, len(records))
+        batch = records[batch_start:batch_end]
+        
+        logger.info(f"Processando lote {batch_start + 1}-{batch_end} de {len(records)} registros...")
+        
         try:
-            logger.info(f"Processando registro {i}/{len(records)}: CPF {record.cpf}, Ordem {record.numero_ordem}")
-            
-            # Processar com a engine
-            results = engine.process_record(record)
-            
-            # Exibir resultados
-            if results:
-                logger.info(f"  >> {len(results)} regra(s) aplicada(s):")
-                for result in results:
-                    logger.info(f"    - {result.rule_name}: {result.decision} ({result.action})")
-                    logger.info(f"      Detalhes: {result.details}")
+            # Processar lote de forma otimizada
+            if batch_size > 1:
+                results_map = engine.process_records_batch(batch)
+                
+                # Processar resultados
+                for i, (record, results) in enumerate(results_map.items(), start=batch_start + 1):
+                    if verbose:
+                        logger.info(f"Registro {i}/{len(records)}: CPF {record.cpf}, Ordem {record.numero_ordem}")
+                    
+                    # Exibir resultados apenas se verbose ou se houver regras aplicadas importantes
+                    if verbose and results:
+                        high_priority = [r for r in results if r.priority <= 2]
+                        if high_priority:
+                            logger.info(f"  >> {len(high_priority)} regra(s) de alta prioridade:")
+                            for result in high_priority:
+                                logger.info(f"    - {result.rule_name}: {result.decision}")
+                    
+                    total_processed += 1
             else:
-                logger.info("  >> Nenhuma regra aplicavel")
-            
-            total_processed += 1
-            
+                # Processar individualmente se batch_size = 1
+                for i, record in enumerate(batch, start=batch_start + 1):
+                    try:
+                        if verbose:
+                            logger.info(f"Processando registro {i}/{len(records)}: CPF {record.cpf}, Ordem {record.numero_ordem}")
+                        
+                        results = engine.process_record(record)
+                        
+                        if verbose and results:
+                            high_priority = [r for r in results if r.priority <= 2]
+                            if high_priority:
+                                logger.info(f"  >> {len(high_priority)} regra(s) de alta prioridade:")
+                                for result in high_priority:
+                                    logger.info(f"    - {result.rule_name}: {result.decision}")
+                        
+                        total_processed += 1
+                    except Exception as e:
+                        logger.error(f"Erro ao processar registro {i}: {e}")
+                        total_errors += 1
+                        
         except Exception as e:
-            logger.error(f"Erro ao processar registro {i}: {e}")
-            total_errors += 1
+            logger.error(f"Erro ao processar lote {batch_start + 1}-{batch_end}: {e}")
+            # Fallback: processar individualmente
+            for i, record in enumerate(batch, start=batch_start + 1):
+                try:
+                    results = engine.process_record(record)
+                    total_processed += 1
+                except Exception as e2:
+                    logger.error(f"Erro ao processar registro {i}: {e2}")
+                    total_errors += 1
+        
+        # Log de progresso a cada lote
+        logger.info(f"Progresso: {batch_end}/{len(records)} registros processados ({batch_end*100//len(records)}%)")
     
     logger.info(f"\nProcessamento concluído!")
     logger.info(f"  Total processado: {total_processed}")
     logger.info(f"  Total de erros: {total_errors}")
+    
+    # Mover arquivo para pasta de processados se especificado
+    if processed_folder:
+        try:
+            processed_path = Path(processed_folder)
+            processed_path.mkdir(parents=True, exist_ok=True)
+            
+            # Criar nome único com timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            new_name = f"{csv_path_obj.stem}_{timestamp}{csv_path_obj.suffix}"
+            destination = processed_path / new_name
+            
+            shutil.move(str(csv_path_obj), str(destination))
+            logger.info(f"Arquivo movido para: {destination}")
+        except Exception as e:
+            logger.warning(f"Não foi possível mover arquivo para pasta processados: {e}")
 
 
 def process_single_record_example():
@@ -204,6 +281,25 @@ def main():
         help='Não monitorar subpastas recursivamente (usado com --watch)'
     )
     
+    parser.add_argument(
+        '--move-processed',
+        type=str,
+        help='Pasta para mover arquivo CSV após processamento (usado com --csv)'
+    )
+    
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Exibir logs detalhados de cada registro processado'
+    )
+    
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=100,
+        help='Tamanho do lote para processamento (padrão: 100)'
+    )
+    
     args = parser.parse_args()
     
     # Criar diretório de logs
@@ -247,7 +343,13 @@ def main():
             logger.error(f"Erro no monitoramento: {e}")
             sys.exit(1)
     elif args.csv:
-        process_csv_file(args.csv, args.db)
+        process_csv_file(
+            args.csv, 
+            args.db,
+            processed_folder=args.move_processed,
+            verbose=args.verbose,
+            batch_size=args.batch_size
+        )
     else:
         # Modo interativo
         logger.info("=== 3F Qigger DB Gerenciador ===\n")
