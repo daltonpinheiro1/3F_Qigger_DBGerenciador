@@ -39,6 +39,11 @@ env/
 *.sqlite3
 data/*.db
 
+# Arquivos processados
+data/processados/
+data/erros/
+data/retornos/
+
 # Logs
 logs/
 *.log
