@@ -114,7 +114,7 @@ class QiggerDecisionEngine:
         
         return results
     
-    def process_records_batch(self, records: List[PortabilidadeRecord]) -> Dict[PortabilidadeRecord, List[DecisionResult]]:
+    def process_records_batch(self, records: List[PortabilidadeRecord]) -> List[Tuple[PortabilidadeRecord, List[DecisionResult]]]:
         """
         Processa múltiplos registros de forma otimizada
         
@@ -122,13 +122,14 @@ class QiggerDecisionEngine:
             records: Lista de registros a serem processados
             
         Returns:
-            Dicionário mapeando cada registro aos seus resultados
+            Lista de tuplas (registro, resultados)
         """
-        results_map = {}
+        results_list = []
         
         # Processar todos os registros (sem salvar no DB ainda)
         for record in records:
-            results_map[record] = self.process_record(record, save_to_db=False)
+            results = self.process_record(record, save_to_db=False)
+            results_list.append((record, results))
         
         # Inserir todos os registros em lote no banco
         if self.db_manager:
@@ -136,7 +137,7 @@ class QiggerDecisionEngine:
                 record_ids = self.db_manager.insert_records_batch(records)
                 
                 # Agora logar as decisões
-                for i, (record, results) in enumerate(results_map.items()):
+                for i, (record, results) in enumerate(results_list):
                     if i < len(record_ids):
                         record_id = record_ids[i]
                         for result in results:
@@ -149,20 +150,66 @@ class QiggerDecisionEngine:
             except Exception as e:
                 logger.error(f"Erro ao salvar lote no banco: {e}")
                 # Fallback: salvar individualmente
-                for record, results in results_map.items():
+                for record, results in results_list:
                     record_id = self.db_manager.insert_record(record)
                     for result in results:
                         self.db_manager.log_rule_execution(
                             record_id, result.rule_name, result.decision, result.execution_time_ms
                         )
         
-        return results_map
+        return results_list
     
     # ========== REGRAS DE VALIDAÇÃO ==========
     
+    @staticmethod
+    def _validar_digitos_verificadores_cpf(cpf: str) -> bool:
+        """
+        Valida os dígitos verificadores do CPF usando o algoritmo oficial
+        
+        Args:
+            cpf: String com 11 dígitos numéricos do CPF
+            
+        Returns:
+            True se os dígitos verificadores estão corretos, False caso contrário
+        """
+        if len(cpf) != 11:
+            return False
+        
+        # Verificar se todos os dígitos são iguais (CPFs inválidos como 11111111111)
+        if cpf == cpf[0] * 11:
+            return False
+        
+        # Calcular primeiro dígito verificador
+        soma = sum(int(cpf[i]) * (10 - i) for i in range(9))
+        digito1 = 11 - (soma % 11)
+        if digito1 >= 10:
+            digito1 = 0
+        
+        # Calcular segundo dígito verificador
+        soma = sum(int(cpf[i]) * (11 - i) for i in range(10))
+        digito2 = 11 - (soma % 11)
+        if digito2 >= 10:
+            digito2 = 0
+        
+        # Verificar se os dígitos calculados correspondem aos fornecidos
+        return int(cpf[9]) == digito1 and int(cpf[10]) == digito2
+    
     def _rule_01_validar_cpf(self, record: PortabilidadeRecord) -> Optional[DecisionResult]:
         """Regra 1: Validar formato e consistência do CPF"""
-        if not record.cpf or len(record.cpf) != 11 or not record.cpf.isdigit():
+        if not record.cpf:
+            return DecisionResult(
+                rule_name="rule_01_validar_cpf",
+                decision="REJEITAR",
+                action="Marcar registro como inválido",
+                details="CPF não fornecido",
+                priority=1
+            )
+        
+        # Remover caracteres não numéricos para validação
+        cpf_limpo = ''.join(filter(str.isdigit, record.cpf))
+        
+        # Verificar formato básico
+        if len(cpf_limpo) != 11:
             return DecisionResult(
                 rule_name="rule_01_validar_cpf",
                 decision="REJEITAR",
@@ -170,6 +217,17 @@ class QiggerDecisionEngine:
                 details=f"CPF inválido: {record.cpf}. Deve conter 11 dígitos numéricos.",
                 priority=1
             )
+        
+        # Validar dígitos verificadores
+        if not self._validar_digitos_verificadores_cpf(cpf_limpo):
+            return DecisionResult(
+                rule_name="rule_01_validar_cpf",
+                decision="REJEITAR",
+                action="Marcar registro como inválido",
+                details=f"CPF inválido: {record.cpf}. Dígitos verificadores incorretos.",
+                priority=1
+            )
+        
         return None
     
     def _rule_02_validar_numero_acesso(self, record: PortabilidadeRecord) -> Optional[DecisionResult]:
@@ -442,7 +500,7 @@ class QiggerDecisionEngine:
     
     def _rule_16_numero_vago(self, record: PortabilidadeRecord) -> Optional[DecisionResult]:
         """Regra 16: Portabilidade de número vago"""
-        if record.motivo_recusa and "Portabillidade de Número Vago" in record.motivo_recusa:
+        if record.motivo_recusa and "Portabilidade de Número Vago" in record.motivo_recusa:
             return DecisionResult(
                 rule_name="rule_16_numero_vago",
                 decision="REJEITAR",

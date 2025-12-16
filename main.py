@@ -6,13 +6,13 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import List
 
-from src.engine import QiggerDecisionEngine, DecisionResult
+from src.engine import QiggerDecisionEngine
 from src.database import DatabaseManager
 from src.utils import CSVParser
 from src.models.portabilidade import PortabilidadeRecord
 from src.monitor import FolderMonitor
+from src.utils.file_output_manager import FileOutputManager
 
 # Configurar encoding UTF-8 para o console no Windows
 from src.utils.console_utils import setup_windows_console
@@ -20,9 +20,6 @@ setup_windows_console()
 
 # Configurar logging
 import io
-import sys
-
-# Configurar encoding UTF-8 para o console no Windows
 if sys.platform == 'win32':
     # Criar handler com encoding UTF-8
     try:
@@ -50,7 +47,10 @@ def process_csv_file(
     db_path: str = "data/portabilidade.db",
     processed_folder: str = None,
     verbose: bool = False,
-    batch_size: int = 100
+    batch_size: int = 100,
+    google_drive_path: str = None,
+    backoffice_path: str = None,
+    delete_after_process: bool = False
 ):
     """
     Processa um arquivo CSV completo com otimizações de performance
@@ -58,9 +58,12 @@ def process_csv_file(
     Args:
         csv_path: Caminho para o arquivo CSV
         db_path: Caminho para o banco de dados
-        processed_folder: Pasta para mover arquivo após processamento (opcional)
+        processed_folder: Pasta para mover arquivo após processamento (opcional, usado se delete_after_process=False)
         verbose: Exibir logs detalhados de cada registro
         batch_size: Tamanho do lote para processamento em batch
+        google_drive_path: Caminho para Google Drive (opcional)
+        backoffice_path: Caminho para Backoffice (opcional)
+        delete_after_process: Se True, deleta arquivo após processar; se False, move para processed_folder
     """
     import shutil
     from pathlib import Path
@@ -85,6 +88,9 @@ def process_csv_file(
     total_errors = 0
     csv_path_obj = Path(csv_path)
     
+    # Mapa para armazenar resultados por registro (chave: CPF_Ordem)
+    results_map = {}
+    
     # Processar em lotes
     for batch_start in range(0, len(records), batch_size):
         batch_end = min(batch_start + batch_size, len(records))
@@ -95,10 +101,14 @@ def process_csv_file(
         try:
             # Processar lote de forma otimizada
             if batch_size > 1:
-                results_map = engine.process_records_batch(batch)
+                results_list = engine.process_records_batch(batch)
                 
                 # Processar resultados
-                for i, (record, results) in enumerate(results_map.items(), start=batch_start + 1):
+                for i, (record, results) in enumerate(results_list, start=batch_start + 1):
+                    # Armazenar resultados no mapa
+                    key = f"{record.cpf}_{record.numero_ordem}"
+                    results_map[key] = results
+                    
                     if verbose:
                         logger.info(f"Registro {i}/{len(records)}: CPF {record.cpf}, Ordem {record.numero_ordem}")
                     
@@ -120,6 +130,10 @@ def process_csv_file(
                         
                         results = engine.process_record(record)
                         
+                        # Armazenar resultados no mapa
+                        key = f"{record.cpf}_{record.numero_ordem}"
+                        results_map[key] = results
+                        
                         if verbose and results:
                             high_priority = [r for r in results if r.priority <= 2]
                             if high_priority:
@@ -138,6 +152,9 @@ def process_csv_file(
             for i, record in enumerate(batch, start=batch_start + 1):
                 try:
                     results = engine.process_record(record)
+                    # Armazenar resultados no mapa
+                    key = f"{record.cpf}_{record.numero_ordem}"
+                    results_map[key] = results
                     total_processed += 1
                 except Exception as e2:
                     logger.error(f"Erro ao processar registro {i}: {e2}")
@@ -150,8 +167,36 @@ def process_csv_file(
     logger.info(f"  Total processado: {total_processed}")
     logger.info(f"  Total de erros: {total_errors}")
     
-    # Mover arquivo para pasta de processados se especificado
-    if processed_folder:
+    # Gerenciar saída do arquivo
+    output_manager = None
+    if google_drive_path or backoffice_path:
+        output_manager = FileOutputManager(
+            google_drive_path=google_drive_path,
+            backoffice_path=backoffice_path
+        )
+    
+    if output_manager:
+        # Copiar para outputs e deletar/mover (passar records e results_map para gerar planilhas específicas)
+        success = total_errors == 0
+        result = output_manager.process_and_cleanup(
+            csv_path_obj,
+            success=success,
+            records=records,
+            results_map=results_map
+        )
+        if result['copied_to']:
+            logger.info(f"Planilhas geradas/copiadas para {len(result['copied_to'])} destino(s)")
+        if result['deleted']:
+            logger.info("Arquivo fonte deletado após processamento")
+    elif delete_after_process:
+        # Deletar arquivo após processar
+        try:
+            csv_path_obj.unlink()
+            logger.info("Arquivo deletado após processamento")
+        except Exception as e:
+            logger.error(f"Erro ao deletar arquivo: {e}")
+    elif processed_folder:
+        # Mover para pasta de processados (comportamento antigo)
         try:
             processed_path = Path(processed_folder)
             processed_path.mkdir(parents=True, exist_ok=True)
@@ -300,6 +345,24 @@ def main():
         help='Tamanho do lote para processamento (padrão: 100)'
     )
     
+    parser.add_argument(
+        '--google-drive',
+        type=str,
+        help='Caminho para Google Drive (ex: G:\\Meu Drive\\Retornos_Qigger)'
+    )
+    
+    parser.add_argument(
+        '--backoffice',
+        type=str,
+        help='Caminho para Backoffice (ex: \\\\files\\07 Backoffice\\RETORNOS RPA - QIGGER\\GERENCIAMENTO)'
+    )
+    
+    parser.add_argument(
+        '--keep-file',
+        action='store_true',
+        help='Manter arquivo após processamento (não deletar)'
+    )
+    
     args = parser.parse_args()
     
     # Criar diretório de logs
@@ -314,10 +377,15 @@ def main():
         logger.info("=== Modo Monitoramento de Pasta ===\n")
         logger.info(f"Monitorando pasta: {args.watch}")
         logger.info(f"Banco de dados: {args.db}")
+        if args.google_drive:
+            logger.info(f"Google Drive: {args.google_drive}")
+        if args.backoffice:
+            logger.info(f"Backoffice: {args.backoffice}")
         if args.processed_folder:
             logger.info(f"Pasta de processados: {args.processed_folder}")
         if args.error_folder:
             logger.info(f"Pasta de erros: {args.error_folder}")
+        logger.info(f"Deletar após processar: {not args.keep_file}")
         logger.info("\nPressione Ctrl+C para parar o monitoramento...\n")
         
         try:
@@ -326,7 +394,10 @@ def main():
                 db_path=args.db,
                 processed_folder=args.processed_folder,
                 error_folder=args.error_folder,
-                recursive=not args.no_recursive
+                recursive=not args.no_recursive,
+                google_drive_path=args.google_drive,
+                backoffice_path=args.backoffice,
+                delete_after_process=not args.keep_file
             )
             
             monitor.start()
@@ -343,12 +414,16 @@ def main():
             logger.error(f"Erro no monitoramento: {e}")
             sys.exit(1)
     elif args.csv:
+        # Processar arquivo CSV
         process_csv_file(
             args.csv, 
             args.db,
             processed_folder=args.move_processed,
             verbose=args.verbose,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            google_drive_path=args.google_drive,
+            backoffice_path=args.backoffice,
+            delete_after_process=not args.keep_file
         )
     else:
         # Modo interativo

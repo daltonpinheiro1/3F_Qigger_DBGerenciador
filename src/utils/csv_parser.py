@@ -77,7 +77,7 @@ class CSVParser:
     @classmethod
     def parse_file(cls, file_path: str) -> List[PortabilidadeRecord]:
         """
-        Parse de arquivo CSV completo
+        Parse de arquivo CSV completo com detecção automática de encoding
         
         Args:
             file_path: Caminho para o arquivo CSV
@@ -90,19 +90,43 @@ class CSVParser:
         if not Path(file_path).exists():
             raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
         
-        with open(file_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            
-            for row_num, row in enumerate(reader, start=2):  # Começa em 2 (linha 1 é header)
-                try:
-                    record = cls._parse_row(row)
-                    if record:
-                        records.append(record)
-                except Exception as e:
-                    logger.error(f"Erro ao processar linha {row_num}: {e}")
-                    continue
+        # Tentar diferentes encodings comuns
+        encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1']
+        encoding_usado = None
+        file_content = None
         
-        logger.info(f"Parseados {len(records)} registros do arquivo {file_path}")
+        # Tentar ler o arquivo com diferentes encodings
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding, errors='replace') as f:
+                    file_content = f.read()
+                    encoding_usado = encoding
+                    logger.debug(f"Arquivo {file_path} lido com encoding: {encoding}")
+                    break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        
+        if file_content is None:
+            raise ValueError(
+                f"Erro ao ler arquivo {file_path}: nenhum encoding funcionou. "
+                f"Tentados: {', '.join(encodings)}"
+            )
+        
+        # Parse do CSV usando o encoding detectado
+        import io
+        f = io.StringIO(file_content)
+        reader = csv.DictReader(f)
+        
+        for row_num, row in enumerate(reader, start=2):  # Começa em 2 (linha 1 é header)
+            try:
+                record = cls._parse_row(row)
+                if record:
+                    records.append(record)
+            except Exception as e:
+                logger.error(f"Erro ao processar linha {row_num}: {e}")
+                continue
+        
+        logger.info(f"Parseados {len(records)} registros do arquivo {file_path} (encoding: {encoding_usado})")
         return records
     
     @classmethod

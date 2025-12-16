@@ -1,5 +1,17 @@
 # Changelog - Melhorias e Correções
 
+## [1.1.1] - 2025-12-12
+
+### 🧹 Limpeza e Organização
+- ✅ Removido import duplicado de `sys` no `main.py`
+- ✅ Removidos arquivos de teste duplicados (`testar_processamento.py`, `teste_processamento_completo.py`, `teste_rapido.py`)
+- ✅ Consolidada documentação duplicada
+- ✅ Removido arquivo pessoal `CAMINHOS_IMPORTANTES.txt` do repositório
+
+### 🐛 Correções
+- Corrigido import duplicado de `sys` no `main.py`
+- Removido comentário duplicado sobre encoding
+
 ## [1.1.0] - 2025-12-11
 
 ### ✨ Melhorias Implementadas
@@ -23,6 +35,13 @@
 - ✅ **Logging otimizado**: Modo `--verbose` para logs detalhados (desabilitado por padrão)
 - ✅ **Redução de commits**: Inserções em lote reduzem commits ao banco
 - ✅ **Filtro de logs**: Exibe apenas regras de alta prioridade (priority <= 2) quando não verbose
+
+#### 4. Melhorias de Validação e Tratamento de Erros
+- ✅ **Validação de CPF aprimorada**: Algoritmo de validação de dígitos verificadores
+- ✅ **Tratamento de encoding melhorado**: Suporte automático a múltiplos encodings (UTF-8, Latin-1, CP1252, ISO-8859-1)
+- ✅ **DatabaseManager**: Melhor tratamento de exceções SQLite com rollback automático
+- ✅ **Timeout de conexão**: Adicionado timeout de 30 segundos para conexões de banco
+- ✅ **Foreign keys habilitadas**: Melhor integridade referencial
 
 ### 📊 Ganhos de Performance Esperados
 - **Processamento em lote**: ~3-5x mais rápido para arquivos grandes
@@ -49,11 +68,14 @@ py main.py --csv arquivo.csv --move-processed pasta/processados --batch-size 200
 - Corrigido encoding no console Windows
 - Corrigido método de inserção em lote (busca correta de IDs)
 - Melhorado tratamento de erros em processamento em lote
+- Corrigido erro de ortografia na Regra 16: "Portabillidade" → "Portabilidade"
+- Corrigido erro no csv_parser.py: UnicodeDecodeError trocado por ValueError apropriado
 
 ### 📝 Arquivos Modificados
-- `main.py` - Função `process_csv_file()` otimizada
+- `main.py` - Função `process_csv_file()` otimizada, import duplicado removido
 - `src/utils/console_utils.py` - Novo módulo para encoding
-- `src/database/db_manager.py` - Método `insert_records_batch()` adicionado
-- `src/engine/qigger_decision_engine.py` - Método `process_records_batch()` adicionado
+- `src/database/db_manager.py` - Método `insert_records_batch()` adicionado, melhor tratamento de erros
+- `src/engine/qigger_decision_engine.py` - Método `process_records_batch()` adicionado, validação CPF aprimorada
+- `src/utils/csv_parser.py` - Suporte a múltiplos encodings, melhor tratamento de erros
 - `src/utils/__init__.py` - Exportação de novos utilitários
 

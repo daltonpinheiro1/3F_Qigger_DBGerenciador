@@ -15,6 +15,7 @@ from watchdog.events import FileSystemEventHandler, FileSystemEvent, FileMovedEv
 from src.engine import QiggerDecisionEngine
 from src.database import DatabaseManager
 from src.utils import CSVParser
+from src.utils.file_output_manager import FileOutputManager
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,9 @@ class CSVFileHandler(FileSystemEventHandler):
         processed_files: Set[str],
         processed_folder: Optional[Path] = None,
         error_folder: Optional[Path] = None,
-        on_file_processed: Optional[Callable] = None
+        on_file_processed: Optional[Callable] = None,
+        output_manager: Optional[FileOutputManager] = None,
+        delete_after_process: bool = True
     ):
         """
         Inicializa o handler de arquivos CSV
@@ -38,9 +41,11 @@ class CSVFileHandler(FileSystemEventHandler):
             engine: Engine de decisão
             db_manager: Gerenciador de banco de dados
             processed_files: Set de arquivos já processados
-            processed_folder: Pasta para mover arquivos processados (opcional)
+            processed_folder: Pasta para mover arquivos processados (opcional, usado se delete_after_process=False)
             error_folder: Pasta para mover arquivos com erro (opcional)
             on_file_processed: Callback chamado quando arquivo é processado
+            output_manager: Gerenciador de saída para Google Drive e Backoffice
+            delete_after_process: Se True, deleta arquivo após processar; se False, move para processed_folder
         """
         self.engine = engine
         self.db_manager = db_manager
@@ -48,6 +53,8 @@ class CSVFileHandler(FileSystemEventHandler):
         self.processed_folder = processed_folder
         self.error_folder = error_folder
         self.on_file_processed = on_file_processed
+        self.output_manager = output_manager
+        self.delete_after_process = delete_after_process
         
         # Criar pastas se necessário
         if self.processed_folder:
@@ -112,13 +119,18 @@ class CSVFileHandler(FileSystemEventHandler):
             records = CSVParser.parse_file(str(file_path_obj))
             logger.info(f"Parseados {len(records)} registros do arquivo {file_path_obj.name}")
             
-            # Processar cada registro
+            # Processar cada registro e armazenar resultados
             total_processed = 0
             total_errors = 0
+            results_map = {}  # Mapa para armazenar resultados por registro
             
             for i, record in enumerate(records, 1):
                 try:
                     results = self.engine.process_record(record)
+                    
+                    # Armazenar resultados no mapa
+                    key = f"{record.cpf}_{record.numero_ordem}"
+                    results_map[key] = results
                     
                     if results:
                         logger.debug(
@@ -140,8 +152,28 @@ class CSVFileHandler(FileSystemEventHandler):
                 f"({total_processed} registros, {total_errors} erros)"
             )
             
-            # Mover para pasta de processados
-            if self.processed_folder:
+            # Copiar para outputs (Google Drive e Backoffice) e deletar/mover
+            if self.output_manager:
+                success = total_errors == 0
+                result = self.output_manager.process_and_cleanup(
+                    file_path_obj,
+                    success=success,
+                    records=records,
+                    results_map=results_map
+                )
+                if result['copied_to']:
+                    logger.info(f"Planilhas geradas/copiadas para {len(result['copied_to'])} destino(s)")
+                if result['deleted']:
+                    logger.info("Arquivo fonte deletado após processamento")
+            elif self.delete_after_process:
+                # Deletar arquivo após processar
+                try:
+                    file_path_obj.unlink()
+                    logger.info(f"Arquivo deletado após processamento: {file_path_obj.name}")
+                except Exception as e:
+                    logger.error(f"Erro ao deletar arquivo: {e}")
+            elif self.processed_folder:
+                # Mover para pasta de processados (comportamento antigo)
                 self._move_file(file_path_obj, self.processed_folder)
             
             # Callback
@@ -187,7 +219,10 @@ class FolderMonitor:
         db_path: str = "data/portabilidade.db",
         processed_folder: Optional[str] = None,
         error_folder: Optional[str] = None,
-        recursive: bool = True
+        recursive: bool = True,
+        google_drive_path: Optional[str] = None,
+        backoffice_path: Optional[str] = None,
+        delete_after_process: bool = True
     ):
         """
         Inicializa o monitor de pasta
@@ -195,15 +230,19 @@ class FolderMonitor:
         Args:
             watch_folder: Pasta a ser monitorada
             db_path: Caminho para o banco de dados
-            processed_folder: Pasta para arquivos processados (opcional)
+            processed_folder: Pasta para arquivos processados (opcional, usado se delete_after_process=False)
             error_folder: Pasta para arquivos com erro (opcional)
             recursive: Monitorar subpastas recursivamente
+            google_drive_path: Caminho para Google Drive (ex: G:\\Meu Drive\\Retornos_Qigger)
+            backoffice_path: Caminho para Backoffice (ex: \\files\07 Backoffice\RETORNOS RPA - QIGGER\GERENCIAMENTO)
+            delete_after_process: Se True, deleta arquivo após processar; se False, move para processed_folder
         """
         self.watch_folder = Path(watch_folder)
         self.db_path = db_path
         self.processed_folder = Path(processed_folder) if processed_folder else None
         self.error_folder = Path(error_folder) if error_folder else None
         self.recursive = recursive
+        self.delete_after_process = delete_after_process
         
         # Verificar se pasta existe
         if not self.watch_folder.exists():
@@ -215,6 +254,14 @@ class FolderMonitor:
         # Inicializar componentes
         self.db_manager = DatabaseManager(db_path)
         self.engine = QiggerDecisionEngine(self.db_manager)
+        
+        # Inicializar gerenciador de saída
+        self.output_manager = None
+        if google_drive_path or backoffice_path:
+            self.output_manager = FileOutputManager(
+                google_drive_path=google_drive_path,
+                backoffice_path=backoffice_path
+            )
         
         # Set de arquivos processados
         self.processed_files: Set[str] = set()
@@ -238,7 +285,9 @@ class FolderMonitor:
             processed_files=self.processed_files,
             processed_folder=self.processed_folder,
             error_folder=self.error_folder,
-            on_file_processed=self._on_file_processed
+            on_file_processed=self._on_file_processed,
+            output_manager=self.output_manager,
+            delete_after_process=self.delete_after_process
         )
         
         # Criar observer
@@ -297,7 +346,9 @@ class FolderMonitor:
                 processed_files=self.processed_files,
                 processed_folder=self.processed_folder,
                 error_folder=self.error_folder,
-                on_file_processed=self._on_file_processed
+                on_file_processed=self._on_file_processed,
+                output_manager=self.output_manager,
+                delete_after_process=self.delete_after_process
             )
             
             handler._process_file(str(csv_file))
