@@ -14,6 +14,14 @@ O **3F Qigger DB Gerenciador** é um sistema completo para processamento e geren
 - **Monitoramento de Pasta**: Processamento automático de arquivos CSV usando watchdog
 - **Logging Completo**: Sistema de logs para auditoria e debug
 - **Testes Unitários**: Cobertura completa de testes para todas as regras
+- **📱 WhatsApp (WPP)**: Sistema completo de homologação e geração de mensagens WhatsApp
+  - Geração de arquivos de homologação WPP
+  - Mapeamento automático de templates (1, 2, 3, 4)
+  - Enriquecimento de dados com Base Analítica e Relatório de Objetos
+  - Normalização de telefones (prioridade: Telefone Portabilidade > DDD+Telefone)
+  - Normalização de CEPs e datas
+  - Geração automática de links de rastreio
+  - Sempre usa o nu_pedido mais recente quando há múltiplos pedidos
 
 ## 📁 Estrutura do Projeto
 
@@ -32,7 +40,11 @@ O **3F Qigger DB Gerenciador** é um sistema completo para processamento e geren
 │   │   └── db_manager.py                  # Gerenciador de banco de dados
 │   ├── utils/
 │   │   ├── __init__.py
-│   │   └── csv_parser.py                   # Parser de arquivos CSV
+│   │   ├── csv_parser.py                   # Parser de arquivos CSV
+│   │   ├── templates_wpp.py                # Mapeamento de templates WPP
+│   │   ├── wpp_output_generator.py         # Gerador de arquivos WPP
+│   │   ├── objects_loader.py               # Loader de Relatório de Objetos
+│   │   └── regua_comunicacao.py            # Régua de comunicação
 │   └── monitor/
 │       ├── __init__.py
 │       └── folder_monitor.py                # Monitor de pasta com watchdog
@@ -41,7 +53,17 @@ O **3F Qigger DB Gerenciador** é um sistema completo para processamento e geren
 │   ├── test_qigger_decision_engine.py      # Testes das 23 regras
 │   ├── test_csv_parser.py                  # Testes do parser
 │   ├── test_database.py                    # Testes do banco de dados
-│   └── test_folder_monitor.py              # Testes do monitor de pasta
+│   ├── test_folder_monitor.py              # Testes do monitor de pasta
+│   ├── test_homologacao_wpp.py             # Testes de homologação WPP
+│   ├── test_homologacao_aprovisionadas.py  # Testes de aprovisionamento
+│   └── test_homologacao_reabertura.py      # Testes de reabertura
+├── scripts/                                 # Scripts .bat organizados
+├── docs/                                    # Documentação
+│   ├── REVISAO_PROJETO_HOMOLOGACAO.md      # Revisão completa
+│   └── RESUMO_HOMOLOGACAO_AJUSTES.md       # Resumo de ajustes
+├── gerar_homologacao_wpp.py                # Gerador de homologação WPP
+├── validar_homologacao.py                   # Validador de homologação
+└── triggers.xlsx                           # Regras de decisão
 ├── data/                                    # Diretório do banco de dados
 ├── logs/                                    # Diretório de logs
 ├── main.py                                  # Arquivo principal
@@ -120,6 +142,36 @@ python main.py --example
 ```bash
 python main.py --list-rules
 ```
+
+### Gerar Arquivo de Homologação WPP
+
+```bash
+python gerar_homologacao_wpp.py
+```
+
+Este script gera um arquivo CSV completo de homologação para WhatsApp com:
+- Dados do cliente (CPF, Nome, Telefone, Endereço completo)
+- Template mapeado automaticamente
+- Variáveis do template preenchidas
+- Preview da mensagem
+- Link de rastreio formatado
+- Status de disparo (sempre FALSE em homologação)
+
+O arquivo será salvo em `data/homologacao_wpp.csv`.
+
+### Validar Arquivo de Homologação
+
+```bash
+python validar_homologacao.py
+```
+
+Valida o arquivo de homologação gerado, verificando:
+- Ordem das colunas
+- Normalização de telefones (11 dígitos)
+- Normalização de CEPs (8 dígitos)
+- Formato de datas (DD/MM/AAAA)
+- Status de disparo (sempre FALSE)
+- Links de rastreio válidos
 
 ### Uso Programático
 
@@ -204,7 +256,20 @@ Execute testes específicos:
 pytest tests/test_qigger_decision_engine.py
 pytest tests/test_csv_parser.py
 pytest tests/test_database.py
+pytest tests/test_homologacao_wpp.py
+pytest tests/test_homologacao_aprovisionadas.py
+pytest tests/test_homologacao_reabertura.py
 ```
+
+### Testes de Homologação
+
+Execute todos os testes de homologação:
+
+```bash
+pytest tests/test_homologacao_*.py -v
+```
+
+Veja o guia completo em `tests/README_HOMOLOGACAO.md`.
 
 ## 🗄️ Banco de Dados
 
@@ -218,7 +283,13 @@ O sistema utiliza SQLite como banco de dados padrão. O banco é criado automati
 
 ## 📝 Logs
 
-Os logs são salvos em `logs/qigger.log` e também exibidos no console.
+Os logs são salvos em:
+- `logs/qigger.log` - Logs principais do sistema
+- `logs/homologacao_wpp.log` - Logs de geração de homologação WPP
+- `logs/regua_comunicacao.log` - Logs da régua de comunicação
+- `logs/regua_dinamica.log` - Logs da régua dinâmica
+
+Todos os logs também são exibidos no console.
 
 ## 🔒 Segurança
 
@@ -248,6 +319,49 @@ Para suporte, entre em contato com a equipe de desenvolvimento.
 
 ---
 
-**Versão**: 1.0.0  
+## 📱 WhatsApp (WPP) - Régua de Comunicação
+
+O sistema inclui funcionalidades completas para geração de mensagens WhatsApp:
+
+### Funcionalidades
+
+- **Geração de Homologação**: Arquivo CSV completo para validação antes do envio
+- **Mapeamento de Templates**: Mapeamento automático de templates baseado em regras
+- **Enriquecimento de Dados**: Preenchimento automático de dados do cliente
+- **Normalização**: Telefones, CEPs e datas normalizados automaticamente
+- **Links de Rastreio**: Geração automática de links formatados
+
+### Templates Disponíveis
+
+1. **Template 1** - Confirmação de Portabilidade
+2. **Template 2** - Pendência SMS Portabilidade
+3. **Template 3** - Confirmação de Endereço
+4. **Template 4** - Outros casos
+
+### Prioridade de Telefone
+
+1. **Telefone Portabilidade** (se disponível)
+2. **DDD + Telefone** normalizado (se Telefone Portabilidade vazio)
+
+### Nu Pedido
+
+O sistema sempre usa o **nu_pedido mais recente** quando há múltiplos pedidos para o mesmo código externo, baseado na data de inserção.
+
+### Formato do Arquivo de Homologação
+
+O arquivo gerado segue a ordem imutável de colunas:
+- Proposta_iSize, Cpf, NomeCliente, Telefone_Contato
+- Endereco, Numero, Complemento, Bairro, Cidade, UF, Cep, Ponto_Referencia
+- Cod_Rastreio, Data_Venda, Tipo_Comunicacao
+- Status_Disparo (sempre FALSE), DataHora_Disparo (sempre vazio)
+- Template_Triggers, O_Que_Aconteceu, Acao_Realizar (apenas homologação)
+
+### Enriquecimento de Dados
+
+O sistema enriquece automaticamente os dados usando:
+- **Relatório de Objetos**: Dados de logística e entrega
+- **Base Analítica Final**: Dados completos do cliente (endereço, telefone, etc.)
+
+**Versão**: 2.0.0  
 **Última atualização**: Dezembro 2025
 
