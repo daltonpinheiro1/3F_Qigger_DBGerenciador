@@ -68,3 +68,14 @@ Thumbs.db
 *.bak
 *.swp
 
+# Scripts temporários de verificação
+verificar_correcoes.py
+verificar_preenchimento.py
+
+# Arquivos de análise/documentação temporários
+analise_cabecalho_unificado.md
+ESPECIFICACOES_CABECALHO.md
+
+# Arquivos de amostra/teste
+data/amostra_validacao_templates.csv
+
