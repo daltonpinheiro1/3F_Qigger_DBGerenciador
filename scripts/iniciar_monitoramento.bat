@@ -4,8 +4,9 @@ title 3F Qigger DB Gerenciador - Monitoramento
 color 0A
 
 echo ============================================
-echo 3F Qigger DB Gerenciador
+echo 3F Qigger DB Gerenciador v2.0
 echo Monitoramento Automático
+echo Com suporte a triggers.xlsx
 echo ============================================
 echo.
 
@@ -35,8 +36,18 @@ pause
 exit /b 1
 
 :python_ok
-REM Mudar para o diretório do script
-cd /d "%~dp0"
+REM Mudar para o diretório raiz do projeto (pai de scripts/)
+cd /d "%~dp0.."
+
+REM Verificar se triggers.xlsx existe
+if not exist "triggers.xlsx" (
+    echo [ERRO] Arquivo triggers.xlsx não encontrado!
+    echo Por favor, verifique se o arquivo existe na pasta do projeto.
+    pause
+    exit /b 1
+)
+echo [OK] Arquivo triggers.xlsx encontrado
+echo.
 
 REM Executar o monitoramento
 echo Iniciando monitoramento...

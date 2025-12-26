@@ -1,5 +1,6 @@
 """
 3F Qigger DB Gerenciador - Sistema de Gerenciamento de Portabilidade
+Versão 3.0 - Com suporte a triggers.xlsx + logística + Régua WPP
 Arquivo principal com exemplo de uso
 """
 import logging
@@ -9,10 +10,14 @@ from pathlib import Path
 
 from src.engine import QiggerDecisionEngine
 from src.database import DatabaseManager
-from src.utils import CSVParser
+from src.utils import CSVParser, ObjectsLoader, WPPOutputGenerator
 from src.models.portabilidade import PortabilidadeRecord
 from src.monitor import FolderMonitor
 from src.utils.file_output_manager import FileOutputManager
+
+# Caminhos padrão
+DEFAULT_TRIGGERS_PATH = Path(__file__).parent / "triggers.xlsx"
+DEFAULT_WPP_OUTPUT = Path(r"G:\Meu Drive\3F Contact Center\WPP_Regua_Output.csv")
 
 # Configurar encoding UTF-8 para o console no Windows
 from src.utils.console_utils import setup_windows_console
@@ -50,7 +55,10 @@ def process_csv_file(
     batch_size: int = 100,
     google_drive_path: str = None,
     backoffice_path: str = None,
-    delete_after_process: bool = False
+    delete_after_process: bool = False,
+    triggers_path: str = None,
+    objects_report_path: str = None,
+    wpp_output_path: str = None
 ):
     """
     Processa um arquivo CSV completo com otimizações de performance
@@ -64,16 +72,35 @@ def process_csv_file(
         google_drive_path: Caminho para Google Drive (opcional)
         backoffice_path: Caminho para Backoffice (opcional)
         delete_after_process: Se True, deleta arquivo após processar; se False, move para processed_folder
+        triggers_path: Caminho para o arquivo triggers.xlsx (opcional)
+        objects_report_path: Caminho para Relatório de Objetos para enriquecimento (opcional)
+        wpp_output_path: Caminho para saída da Régua de Comunicação WPP (opcional)
     """
     import shutil
     from pathlib import Path
     from datetime import datetime
     
+    # Usar triggers_path padrão se não especificado
+    if triggers_path is None:
+        triggers_path = str(DEFAULT_TRIGGERS_PATH)
+    
     logger.info(f"Iniciando processamento do arquivo: {csv_path}")
+    logger.info(f"Arquivo de triggers: {triggers_path}")
+    
+    # Carregar Relatório de Objetos se especificado
+    objects_loader = None
+    if objects_report_path and Path(objects_report_path).exists():
+        objects_loader = ObjectsLoader(objects_report_path)
+        logger.info(f"Relatório de Objetos carregado: {objects_loader.total_records} registros")
     
     # Inicializar componentes
     db_manager = DatabaseManager(db_path)
-    engine = QiggerDecisionEngine(db_manager)
+    engine = QiggerDecisionEngine(
+        db_manager, 
+        triggers_path=triggers_path,
+        objects_loader=objects_loader,
+        wpp_output_path=wpp_output_path
+    )
     
     # Parse do CSV
     try:
@@ -167,6 +194,18 @@ def process_csv_file(
     logger.info(f"  Total processado: {total_processed}")
     logger.info(f"  Total de erros: {total_errors}")
     
+    # Estatísticas de enriquecimento
+    com_logistica = sum(1 for r in records if r.nome_cliente)
+    com_template = sum(1 for r in records if r.template)
+    logger.info(f"  Com dados de logística: {com_logistica}")
+    logger.info(f"  Com Template (WPP): {com_template}")
+    
+    # Gerar saída WPP para registros com Template
+    if com_template > 0 and wpp_output_path:
+        wpp_file = engine.generate_wpp_output(records, output_path=wpp_output_path)
+        if wpp_file:
+            logger.info(f"Arquivo WPP gerado: {wpp_file}")
+    
     # Gerenciar saída do arquivo
     output_manager = None
     if google_drive_path or backoffice_path:
@@ -218,7 +257,7 @@ def process_single_record_example():
     
     # Criar banco de dados e engine
     db_manager = DatabaseManager("data/portabilidade.db")
-    engine = QiggerDecisionEngine(db_manager)
+    engine = QiggerDecisionEngine(db_manager, triggers_path=str(DEFAULT_TRIGGERS_PATH))
     
     # Criar um registro de exemplo
     from datetime import datetime
@@ -260,13 +299,22 @@ def process_single_record_example():
 
 
 def list_all_rules():
-    """Lista todas as regras disponíveis"""
-    logger.info("=== Regras Disponíveis na QiggerDecisionEngine ===\n")
+    """Lista todas as regras disponíveis do triggers.xlsx"""
+    logger.info("=== Regras Disponíveis (triggers.xlsx) ===\n")
     
-    engine = QiggerDecisionEngine()
+    engine = QiggerDecisionEngine(triggers_path=str(DEFAULT_TRIGGERS_PATH))
     
-    for i, rule_name in enumerate(engine.rules_registry.keys(), 1):
-        logger.info(f"{i:2d}. {rule_name}")
+    stats = engine.get_rules_stats()
+    logger.info(f"Total de regras: {stats['total_regras']}\n")
+    
+    # Listar por tipo de mensagem
+    logger.info("Por Tipo de Mensagem:")
+    for tipo, count in stats.get('por_tipo_mensagem', {}).items():
+        logger.info(f"  {tipo}: {count}")
+    
+    logger.info("\nPor Ação a Realizar:")
+    for acao, count in stats.get('por_acao', {}).items():
+        logger.info(f"  {acao}: {count}")
 
 
 def main():
@@ -363,6 +411,26 @@ def main():
         help='Manter arquivo após processamento (não deletar)'
     )
     
+    parser.add_argument(
+        '--triggers',
+        type=str,
+        default=str(DEFAULT_TRIGGERS_PATH),
+        help=f'Caminho para arquivo triggers.xlsx (padrão: {DEFAULT_TRIGGERS_PATH})'
+    )
+    
+    parser.add_argument(
+        '--objects-report',
+        type=str,
+        help='Caminho para Relatório de Objetos (xlsx) para enriquecimento com dados de logística'
+    )
+    
+    parser.add_argument(
+        '--wpp-output',
+        type=str,
+        default=str(DEFAULT_WPP_OUTPUT),
+        help=f'Caminho para saída da Régua de Comunicação WPP (padrão: {DEFAULT_WPP_OUTPUT})'
+    )
+    
     args = parser.parse_args()
     
     # Criar diretório de logs
@@ -376,6 +444,7 @@ def main():
         # Modo monitoramento de pasta
         logger.info("=== Modo Monitoramento de Pasta ===\n")
         logger.info(f"Monitorando pasta: {args.watch}")
+        logger.info(f"Arquivo de triggers: {args.triggers}")
         logger.info(f"Banco de dados: {args.db}")
         if args.google_drive:
             logger.info(f"Google Drive: {args.google_drive}")
@@ -397,7 +466,8 @@ def main():
                 recursive=not args.no_recursive,
                 google_drive_path=args.google_drive,
                 backoffice_path=args.backoffice,
-                delete_after_process=not args.keep_file
+                delete_after_process=not args.keep_file,
+                triggers_path=args.triggers
             )
             
             monitor.start()
@@ -423,7 +493,10 @@ def main():
             batch_size=args.batch_size,
             google_drive_path=args.google_drive,
             backoffice_path=args.backoffice,
-            delete_after_process=not args.keep_file
+            delete_after_process=not args.keep_file,
+            triggers_path=args.triggers,
+            objects_report_path=args.objects_report,
+            wpp_output_path=args.wpp_output
         )
     else:
         # Modo interativo

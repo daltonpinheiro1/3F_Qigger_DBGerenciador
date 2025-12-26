@@ -222,7 +222,8 @@ class FolderMonitor:
         recursive: bool = True,
         google_drive_path: Optional[str] = None,
         backoffice_path: Optional[str] = None,
-        delete_after_process: bool = True
+        delete_after_process: bool = True,
+        triggers_path: Optional[str] = None
     ):
         """
         Inicializa o monitor de pasta
@@ -234,8 +235,9 @@ class FolderMonitor:
             error_folder: Pasta para arquivos com erro (opcional)
             recursive: Monitorar subpastas recursivamente
             google_drive_path: Caminho para Google Drive (ex: G:\\Meu Drive\\Retornos_Qigger)
-            backoffice_path: Caminho para Backoffice (ex: \\files\07 Backoffice\RETORNOS RPA - QIGGER\GERENCIAMENTO)
+            backoffice_path: Caminho para Backoffice (ex: \\\\files\\07 Backoffice\\RETORNOS RPA - QIGGER\\GERENCIAMENTO)
             delete_after_process: Se True, deleta arquivo após processar; se False, move para processed_folder
+            triggers_path: Caminho para o arquivo triggers.xlsx (opcional)
         """
         self.watch_folder = Path(watch_folder)
         self.db_path = db_path
@@ -243,6 +245,7 @@ class FolderMonitor:
         self.error_folder = Path(error_folder) if error_folder else None
         self.recursive = recursive
         self.delete_after_process = delete_after_process
+        self.triggers_path = triggers_path or "triggers.xlsx"
         
         # Verificar se pasta existe
         if not self.watch_folder.exists():
@@ -253,7 +256,7 @@ class FolderMonitor:
         
         # Inicializar componentes
         self.db_manager = DatabaseManager(db_path)
-        self.engine = QiggerDecisionEngine(self.db_manager)
+        self.engine = QiggerDecisionEngine(self.db_manager, triggers_path=self.triggers_path)
         
         # Inicializar gerenciador de saída
         self.output_manager = None

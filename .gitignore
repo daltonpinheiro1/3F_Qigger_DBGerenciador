@@ -38,11 +38,16 @@ env/
 *.sqlite
 *.sqlite3
 data/*.db
+*.db-shm
+*.db-wal
 
 # Arquivos processados
 data/processados/
 data/erros/
 data/retornos/
+
+# Arquivos temporários de homologação
+data/homologacao_wpp_*.csv
 
 # Logs
 logs/

@@ -57,6 +57,7 @@ class CSVGenerator:
                         'Numero_Acesso',
                         'Numero_Ordem',
                         'Codigo_Externo',
+                        'Cod_Rastreio',  # Link de rastreio https://tim.trakin.co/o/{pedido}
                         'Numero_Temporario',
                         'Bilhete_Temporario',
                         'Numero_Bilhete',
@@ -136,6 +137,11 @@ class CSVGenerator:
                             except:
                                 return default
                         
+                        # Gerar link de rastreio se não existir
+                        cod_rastreio = safe_str(record.cod_rastreio)
+                        if not cod_rastreio or not cod_rastreio.startswith('http'):
+                            cod_rastreio = PortabilidadeRecord.gerar_link_rastreio(record.codigo_externo) or ''
+                        
                         # Montar linha com dados tratados
                         row = [
                             record_id,
@@ -144,6 +150,7 @@ class CSVGenerator:
                             safe_str(record.numero_acesso),
                             safe_str(record.numero_ordem),
                             safe_str(record.codigo_externo),
+                            cod_rastreio,  # Link de rastreio https://tim.trakin.co/o/{pedido}
                             safe_str(record.numero_temporario),
                             safe_str(record.bilhete_temporario),
                             safe_str(record.numero_bilhete),
@@ -256,6 +263,7 @@ class CSVGenerator:
                     'Numero_Acesso',
                     'Numero_Ordem',
                     'Codigo_Externo',
+                    'Cod_Rastreio',  # Link de rastreio https://tim.trakin.co/o/{pedido}
                     'Status_Bilhete',
                     'Status_Ordem',
                     'Operadora_Doadora',
@@ -300,11 +308,17 @@ class CSVGenerator:
                         decisoes = "; ".join([r.decision for r in results if r and r.decision]) if results else ''
                         acoes = "; ".join([r.action for r in results if r and r.action]) if results else ''
                         
+                        # Gerar link de rastreio
+                        cod_rastreio = safe_str(record.cod_rastreio)
+                        if not cod_rastreio or not cod_rastreio.startswith('http'):
+                            cod_rastreio = PortabilidadeRecord.gerar_link_rastreio(record.codigo_externo) or ''
+                        
                         row = [
                             safe_str(record.cpf),
                             safe_str(record.numero_acesso),
                             safe_str(record.numero_ordem),
                             safe_str(record.codigo_externo),
+                            cod_rastreio,  # Link de rastreio
                             safe_enum(record.status_bilhete),
                             safe_enum(record.status_ordem),
                             safe_str(record.operadora_doadora),
@@ -399,6 +413,7 @@ class CSVGenerator:
                     'Numero_Acesso',
                     'Numero_Ordem',
                     'Codigo_Externo',
+                    'Cod_Rastreio',  # Link de rastreio https://tim.trakin.co/o/{pedido}
                     'Status_Bilhete',
                     'Status_Ordem',
                     'Operadora_Doadora',
@@ -443,11 +458,17 @@ class CSVGenerator:
                         decisoes = "; ".join([r.decision for r in results if r and r.decision]) if results else ''
                         acoes = "; ".join([r.action for r in results if r and r.action]) if results else ''
                         
+                        # Gerar link de rastreio
+                        cod_rastreio = safe_str(record.cod_rastreio)
+                        if not cod_rastreio or not cod_rastreio.startswith('http'):
+                            cod_rastreio = PortabilidadeRecord.gerar_link_rastreio(record.codigo_externo) or ''
+                        
                         row = [
                             safe_str(record.cpf),
                             safe_str(record.numero_acesso),
                             safe_str(record.numero_ordem),
                             safe_str(record.codigo_externo),
+                            cod_rastreio,  # Link de rastreio
                             safe_enum(record.status_bilhete),
                             safe_enum(record.status_ordem),
                             safe_str(record.operadora_doadora),

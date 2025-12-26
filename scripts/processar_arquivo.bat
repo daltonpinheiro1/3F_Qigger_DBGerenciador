@@ -4,8 +4,9 @@ title 3F Qigger DB Gerenciador - Processar Arquivo
 color 0B
 
 echo ============================================
-echo 3F Qigger DB Gerenciador
+echo 3F Qigger DB Gerenciador v2.0
 echo Processar Arquivo CSV
+echo Com suporte a triggers.xlsx
 echo ============================================
 echo.
 
@@ -17,8 +18,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Mudar para o diretório do script
-cd /d "%~dp0"
+REM Mudar para o diretório raiz do projeto (pai de scripts/)
+cd /d "%~dp0.."
+
+REM Verificar se triggers.xlsx existe
+if not exist "triggers.xlsx" (
+    echo ERRO: Arquivo triggers.xlsx não encontrado!
+    echo Por favor, verifique se o arquivo existe na pasta do projeto.
+    pause
+    exit /b 1
+)
 
 REM Verificar se arquivo foi passado como parâmetro
 if "%~1"=="" (

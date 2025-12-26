@@ -1,5 +1,130 @@
 # Changelog - Melhorias e Correções
 
+## [2.0.0] - 2025-12-22
+
+### 🚀 Melhorias de Performance
+
+#### 1. Otimização do ObjectsLoader
+- ✅ **Indexação múltipla**: Índices por código externo, ID ERP, CPF e Nu Pedido
+- ✅ **Cache de buscas**: Cache LRU para evitar buscas repetidas
+- ✅ **Pré-ordenação**: Registros ordenados por data para priorização automática do mais recente
+- ✅ **Novo método `find_by_nu_pedido()`**: Busca pelo número do pedido original
+- ✅ **Método `clear_cache()`**: Limpeza manual do cache quando necessário
+
+#### 2. Otimização do TriggerLoader
+- ✅ **Índice por status_bilhete**: Busca O(1) para regras por status
+- ✅ **Índice por regra_id**: Busca direta por ID da regra
+- ✅ **Cache de matching**: Cache por chave composta MD5 para evitar reavaliações
+- ✅ **Early returns**: Retornos antecipados no algoritmo de matching
+- ✅ **Novo método `get_rules_by_status()`**: Busca todas regras de um status
+
+#### 3. Otimização do Engine de Decisão
+- ✅ **Enriquecimento em batch**: Método `_batch_enrich_logistics()` para processar múltiplos registros
+- ✅ **Processamento paralelo opcional**: Suporte a ThreadPoolExecutor para grandes lotes
+- ✅ **Salvamento em batch otimizado**: Método `_batch_save_to_db()`
+- ✅ **Métricas de performance**: Log de registros/segundo no processamento
+
+### ✨ Nova Funcionalidade: Link de Rastreio
+
+#### Implementação do Link https://tim.trakin.co/o/{numero_pedido}
+- ✅ **Método `gerar_link_rastreio()`**: Gera link automaticamente a partir do código do pedido
+- ✅ **Priorização de fontes**: 
+  1. Nu Pedido do Relatório de Objetos (mais atualizado)
+  2. Código externo do registro
+  3. Fallback para rastreio original
+- ✅ **Campo Cod_Rastreio**: Adicionado em todas as planilhas de saída:
+  - Retornos_Qigger.csv (Google Drive)
+  - Aprovisionamentos.csv (Backoffice)
+  - Reabertura.csv (Backoffice)
+  - WPP_Regua_Output.csv (Régua de Comunicação)
+
+### 🐛 Correções de Bugs
+
+#### Model PortabilidadeRecord
+- ✅ Adicionados campos faltantes que causavam erros no csv_generator:
+  - `motivo_nao_cancelado`
+  - `motivo_nao_aberto`
+  - `motivo_nao_reagendado`
+  - `numero_acesso_valido`
+  - `ajustes_registro`
+  - `ajustes_numero_acesso`
+  - `novo_status_bilhete`
+  - `nova_data_portabilidade`
+- ✅ Atualizado método `to_dict()` para incluir todos os campos
+
+### 📊 Melhorias na Integração de Bases
+
+#### Régua de Comunicação Dinâmica
+- ✅ **Priorização de dados para envio**: Dados do Relatório de Objetos têm prioridade
+- ✅ **Consolidação inteligente**: Dados mais recentes prevalecem
+- ✅ **Fallback automático**: Se não houver logística, usa dados da base analítica
+- ✅ **Link de rastreio garantido**: Sempre gera link mesmo sem dados de logística
+
+### 📁 Arquivos Modificados
+
+```
+src/models/portabilidade.py
+  - Novos campos adicionados
+  - Método gerar_link_rastreio()
+  - Método enrich_with_logistics() atualizado
+  - Método to_wpp_dict() atualizado
+
+src/utils/objects_loader.py
+  - Versão 2.0 com indexação otimizada
+  - Cache de buscas
+  - Métodos de busca otimizados
+
+src/engine/trigger_loader.py
+  - Versão 2.0 com cache e índices
+  - Early returns no matching
+  - Geração de cache key MD5
+
+src/engine/qigger_decision_engine.py
+  - Versão 3.1 com batch otimizado
+  - Geração automática de links de rastreio
+  - Suporte a processamento paralelo
+
+src/utils/csv_generator.py
+  - Campo Cod_Rastreio em todas as planilhas
+  - Geração automática de links
+
+src/utils/regua_comunicacao.py
+  - Integração com links de rastreio
+
+src/utils/regua_comunicacao_dinamica.py
+  - Priorização de dados do Relatório de Objetos
+  - Geração de links de rastreio
+```
+
+### 📱 Mapeamento de Templates WhatsApp
+
+Novo módulo `src/utils/templates_wpp.py` com mapeamento dos templates:
+
+| ID | Nome_modelo | Uso |
+|----|-------------|-----|
+| 1 | `confirma_portabilidade_v1` | Confirmação de portabilidade processada |
+| 2 | `pendencia_sms_portabilidade` | Pendência de validação SMS |
+| 3 | `aviso_retirada_correios_v1` | Chip aguardando retirada nos Correios |
+| 4 | `confirmacao_endereco_v1` | Confirmação de endereço de entrega |
+
+**Mapeamento Tipo_Comunicacao -> Template:**
+- 1, 2, 3 (Portabilidade) → `confirma_portabilidade_v1`
+- 5, 6 (Reagendar/Pendente) → `pendencia_sms_portabilidade`
+- 14 (Aguardando Retirada) → `aviso_retirada_correios_v1`
+- 43 (Endereço Incorreto) → `confirmacao_endereco_v1`
+
+**Novos campos na saída WPP:**
+- `Template_ID`: ID do template (1, 2, 3, 4)
+- `Template_Nome`: Nome do modelo do template
+- `Template_Variaveis`: Variáveis formatadas (ex: `{{1}}=João;{{2}}=ABC123`)
+
+### 📈 Ganhos de Performance Esperados
+- **Busca de regras**: ~5-10x mais rápido com índices
+- **Busca de objetos**: ~3-5x mais rápido com cache
+- **Processamento batch**: ~2-3x mais rápido com enriquecimento em batch
+
+---
+
 ## [1.1.1] - 2025-12-12
 
 ### 🧹 Limpeza e Organização

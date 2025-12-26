@@ -54,6 +54,110 @@ BASE_ANALITICA_PATH = Path(r"G:\Meu Drive\3F Contact Center\base_analitica_final
 PALAVRAS_IGNORAR = {'e', 'de', 'da', 'do', 'das', 'dos', 'em', 'na', 'no', 'nas', 'nos'}
 
 
+def normalizar_telefone(telefone: str) -> str:
+    """
+    Normaliza telefone para formato brasileiro: 11 dígitos (DDD + nono dígito + número)
+    Exemplo: "31999887766"
+    
+    Args:
+        telefone: Telefone em qualquer formato
+        
+    Returns:
+        Telefone normalizado com 11 dígitos ou string vazia
+    """
+    if not telefone:
+        return ""
+    
+    # Remover todos os caracteres não numéricos
+    telefone_limpo = ''.join(filter(str.isdigit, str(telefone)))
+    
+    # Se já tem 11 dígitos, retornar
+    if len(telefone_limpo) == 11:
+        return telefone_limpo
+    
+    # Se tem 10 dígitos (DDD + número sem nono dígito), adicionar 9
+    if len(telefone_limpo) == 10:
+        return telefone_limpo[:2] + '9' + telefone_limpo[2:]
+    
+    # Se tem menos de 10 dígitos, não é válido
+    if len(telefone_limpo) < 10:
+        return ""
+    
+    # Se tem mais de 11 dígitos, pegar os últimos 11
+    if len(telefone_limpo) > 11:
+        return telefone_limpo[-11:]
+    
+    return telefone_limpo
+
+
+def normalizar_cep(cep: str) -> str:
+    """
+    Normaliza CEP para formato brasileiro: 8 dígitos com zeros à esquerda
+    Exemplo: "30620090"
+    
+    Args:
+        cep: CEP em qualquer formato
+        
+    Returns:
+        CEP normalizado com 8 dígitos ou string vazia
+    """
+    if not cep:
+        return ""
+    
+    # Remover todos os caracteres não numéricos
+    cep_limpo = ''.join(filter(str.isdigit, str(cep)))
+    
+    # Se vazio, retornar vazio
+    if not cep_limpo:
+        return ""
+    
+    # Preencher com zeros à esquerda até 8 dígitos
+    cep_normalizado = cep_limpo.zfill(8)
+    
+    # Se tiver mais de 8 dígitos, pegar apenas os primeiros 8
+    if len(cep_normalizado) > 8:
+        cep_normalizado = cep_normalizado[:8]
+    
+    return cep_normalizado
+
+
+def normalizar_data_venda(data) -> str:
+    """
+    Normaliza data de venda para formato DD/MM/AAAA
+    
+    Args:
+        data: Data em qualquer formato (datetime, string, etc)
+        
+    Returns:
+        Data formatada como DD/MM/AAAA ou string vazia
+    """
+    from datetime import datetime as dt_class
+    
+    if not data:
+        return ""
+    
+    # Se já é string no formato correto, retornar
+    if isinstance(data, str):
+        # Tentar parsear e reformatar
+        try:
+            # Tentar formatos comuns
+            for fmt in ['%d/%m/%Y', '%Y-%m-%d', '%d/%m/%Y %H:%M:%S', '%Y-%m-%d %H:%M:%S']:
+                try:
+                    dt = dt_class.strptime(data.strip(), fmt)
+                    return dt.strftime('%d/%m/%Y')
+                except ValueError:
+                    continue
+        except:
+            pass
+        return data.strip()
+    
+    # Se é datetime, formatar
+    if isinstance(data, dt_class):
+        return data.strftime('%d/%m/%Y')
+    
+    return str(data)
+
+
 class BaseAnaliticaLoader:
     """Carrega e busca dados da base analítica final"""
     
@@ -512,19 +616,40 @@ def gerar_arquivo_homologacao():
                             break
                 
                 # 3. Tentar buscar por nu_pedido usando o código externo
+                # IMPORTANTE: Se houver múltiplos pedidos, usar sempre o mais recente
                 if not obj_match and hasattr(objects_loader, '_index_by_nu_pedido'):
-                    # Procurar nu_pedidos que contenham o código externo
+                    # Coletar todos os matches primeiro
+                    matches_por_codigo = []
+                    codigo_target = str(record.codigo_externo).strip().lstrip('0')
+                    
                     for nu_ped, obj in objects_loader._index_by_nu_pedido.items():
-                        if str(record.codigo_externo) in str(obj.codigo_externo) or str(record.codigo_externo) in str(nu_ped):
-                            obj_match = obj
-                            break
+                        codigo_obj = str(getattr(obj, 'codigo_externo', '')).strip().lstrip('0')
+                        # Verificar se o código externo do objeto corresponde
+                        if codigo_obj == codigo_target or \
+                           str(record.codigo_externo) in str(nu_ped) or \
+                           codigo_target in str(nu_ped):
+                            matches_por_codigo.append(obj)
+                    
+                    # Se encontrou múltiplos, escolher o mais recente por data
+                    if matches_por_codigo:
+                        # Ordenar por data de inserção ou criação (mais recente primeiro)
+                        matches_por_codigo.sort(
+                            key=lambda x: (
+                                x.data_insercao or x.data_criacao_pedido or datetime.min
+                            ),
+                            reverse=True
+                        )
+                        obj_match = matches_por_codigo[0]  # Pegar o mais recente
                 
                 # 4. Tentar buscar todos os registros por CPF e encontrar o que tem código externo próximo
+                # IMPORTANTE: Se houver múltiplos, usar sempre o mais recente
                 if not obj_match and record.cpf and hasattr(objects_loader, '_index_by_cpf'):
                     matches = objects_loader._index_by_cpf.get(record.cpf, [])
                     if matches:
                         # Tentar encontrar o mais próximo do código externo
                         codigo_target = str(record.codigo_externo).strip().lstrip('0')
+                        matches_com_codigo = []
+                        
                         for match in matches:
                             codigo_match = str(getattr(match, 'codigo_externo', '')).strip().lstrip('0')
                             if codigo_match:
@@ -532,11 +657,21 @@ def gerar_arquivo_homologacao():
                                 if codigo_match == codigo_target or \
                                    codigo_match.endswith(codigo_target[-6:]) or \
                                    codigo_target.endswith(codigo_match[-6:]):
-                                    obj_match = match
-                                    break
-                        # Se não encontrou similar, usar o mais recente (último da lista)
-                        if not obj_match and matches:
-                            obj_match = matches[-1]
+                                    matches_com_codigo.append(match)
+                        
+                        # Se encontrou matches com código similar, escolher o mais recente
+                        if matches_com_codigo:
+                            # Ordenar por data (mais recente primeiro)
+                            matches_com_codigo.sort(
+                                key=lambda x: (
+                                    x.data_insercao or x.data_criacao_pedido or datetime.min
+                                ),
+                                reverse=True
+                            )
+                            obj_match = matches_com_codigo[0]  # Pegar o mais recente
+                        # Se não encontrou similar, usar o mais recente de todos (primeiro da lista, já ordenado)
+                        elif matches:
+                            obj_match = matches[0]  # Primeiro já é o mais recente (ordenado no load)
             
             # 5. Se ainda não encontrou e temos número de acesso, tentar buscar por ID ERP
             if not obj_match and record.numero_acesso:
@@ -574,11 +709,12 @@ def gerar_arquivo_homologacao():
                         else:
                             nu_pedido_encontrado = f"26-{nu_pedido_str.zfill(8)}"
         
-        # Buscar data de conexão no banco de dados (data_inicial_processamento)
+        # Buscar data de conexão no banco de dados (data_inicial_processamento ou Data Conectada)
         data_conexao = None
         if not record.data_venda:
             with db_manager._get_connection() as conn:
                 cursor = conn.cursor()
+                # Buscar data_inicial_processamento (Data Conectada)
                 cursor.execute("""
                     SELECT data_inicial_processamento, data_portabilidade 
                     FROM portabilidade_records 
@@ -587,7 +723,7 @@ def gerar_arquivo_homologacao():
                 """, (record.codigo_externo,))
                 result = cursor.fetchone()
                 if result:
-                    data_conexao = result[0] or result[1]  # data_inicial_processamento ou data_portabilidade
+                    data_conexao = result[0] or result[1]  # data_inicial_processamento (Data Conectada) ou data_portabilidade
                     if data_conexao:
                         from datetime import datetime as dt_parser
                         if isinstance(data_conexao, str):
@@ -600,18 +736,15 @@ def gerar_arquivo_homologacao():
                                     data_conexao = None
                         record.data_venda = data_conexao
         
-        # Se não encontrou dados no ObjectsLoader, buscar na Base Analítica Final
+        # Sempre buscar na Base Analítica Final para preencher endereços e dados faltantes
         if base_analitica_loader and base_analitica_loader.is_loaded:
-            # Buscar apenas se ainda não temos os dados principais
-            precisa_buscar = not record.nome_cliente or not record.cidade or not record.cep
+            # Buscar sempre (mesmo que já tenha alguns dados, pode ter endereço completo)
+            base_match = base_analitica_loader.find_best_match(
+                codigo_externo=record.codigo_externo,
+                cpf=record.cpf
+            )
             
-            if precisa_buscar:
-                base_match = base_analitica_loader.find_best_match(
-                    codigo_externo=record.codigo_externo,
-                    cpf=record.cpf
-                )
-                
-                if base_match is not None:
+            if base_match is not None:
                     # Preencher dados que estão faltando
                     # Mapear colunas da base analítica (nomes exatos das colunas)
                     if not record.nome_cliente:
@@ -619,10 +752,69 @@ def gerar_arquivo_homologacao():
                         if pd.notna(nome) and nome:
                             record.nome_cliente = str(nome).strip()
                     
-                    if not record.telefone_contato:
-                        telefone = base_match.get('Telefone') or base_match.get('Telefone Portabilidade')
-                        if pd.notna(telefone) and telefone:
-                            record.telefone_contato = str(telefone).strip()
+                    # Preencher telefone da Base Analítica com PRIORIDADE ESPECÍFICA:
+                    # 1. PRIMEIRO: "Telefone Portabilidade" (se não vazio)
+                    # 2. SE VAZIO: DDD + Telefone normalizado (31988776655)
+                    
+                    telefone_final = None
+                    
+                    # PRIORIDADE 1: Telefone Portabilidade
+                    telefone_portabilidade = base_match.get('Telefone Portabilidade')
+                    if pd.notna(telefone_portabilidade) and telefone_portabilidade:
+                        telefone_str = str(telefone_portabilidade).strip()
+                        # Remover ponto decimal se for número float
+                        if telefone_str.endswith('.0'):
+                            telefone_str = telefone_str[:-2]
+                        if telefone_str:
+                            telefone_final = telefone_str
+                    
+                    # PRIORIDADE 2: Se Telefone Portabilidade estiver vazio, usar DDD + Telefone
+                    if not telefone_final:
+                        # Buscar DDD
+                        ddd = None
+                        for col_name in ['DDD', 'DDD.1']:
+                            ddd_val = base_match.get(col_name)
+                            if pd.notna(ddd_val) and ddd_val:
+                                ddd_str = str(ddd_val).strip()
+                                # Remover ponto decimal se for número float
+                                if ddd_str.endswith('.0'):
+                                    ddd_str = ddd_str[:-2]
+                                if ddd_str:
+                                    ddd = ddd_str
+                                    break
+                        
+                        # Buscar Telefone (não portabilidade)
+                        telefone_normal = None
+                        for col_name in ['Telefone', 'Telefone.1']:
+                            telefone_val = base_match.get(col_name)
+                            if pd.notna(telefone_val) and telefone_val:
+                                telefone_str = str(telefone_val).strip()
+                                # Remover ponto decimal se for número float
+                                if telefone_str.endswith('.0'):
+                                    telefone_str = telefone_str[:-2]
+                                if telefone_str:
+                                    telefone_normal = telefone_str
+                                    break
+                        
+                        # Combinar DDD + Telefone se ambos existirem
+                        if ddd and telefone_normal:
+                            # Limpar caracteres não numéricos
+                            ddd_digitos = ''.join(filter(str.isdigit, ddd))
+                            telefone_digitos = ''.join(filter(str.isdigit, telefone_normal))
+                            
+                            # Combinar: DDD + Telefone
+                            telefone_combinado = ddd_digitos + telefone_digitos
+                            telefone_final = telefone_combinado
+                        elif telefone_normal:
+                            # Se só tem telefone sem DDD, usar apenas o telefone
+                            telefone_final = ''.join(filter(str.isdigit, telefone_normal))
+                    
+                    # Se encontrou telefone, normalizar e atribuir
+                    if telefone_final:
+                        # Limpar caracteres não numéricos
+                        telefone_limpo = ''.join(filter(str.isdigit, telefone_final))
+                        # Normalizar telefone (garantir 11 dígitos)
+                        record.telefone_contato = normalizar_telefone(telefone_limpo)
                     
                     if not record.cidade:
                         cidade = base_match.get('Cidade')
@@ -635,34 +827,54 @@ def gerar_arquivo_homologacao():
                             record.uf = str(uf).strip()
                     
                     if not record.cep:
-                        cep = base_match.get('Cep')
+                        cep = base_match.get('Cep') or base_match.get('CEP') or base_match.get('Cep')
                         if pd.notna(cep) and cep:
                             record.cep = str(cep).strip()
                     
-                    if not endereco_data['endereco']:
-                        endereco = base_match.get('Endereco')
-                        if pd.notna(endereco) and endereco:
-                            endereco_data['endereco'] = str(endereco).strip()
+                    # Buscar Data Conectada da base analítica
+                    if not record.data_venda:
+                        data_conectada = base_match.get('Data Conectada') or base_match.get('Data_Conectada') or base_match.get('Data Conectada')
+                        if pd.notna(data_conectada) and data_conectada:
+                            try:
+                                from datetime import datetime as dt_parser
+                                if isinstance(data_conectada, str):
+                                    try:
+                                        record.data_venda = dt_parser.strptime(data_conectada, '%d/%m/%Y')
+                                    except:
+                                        try:
+                                            record.data_venda = dt_parser.strptime(data_conectada, '%Y-%m-%d')
+                                        except:
+                                            pass
+                                elif hasattr(data_conectada, 'to_pydatetime'):
+                                    record.data_venda = data_conectada.to_pydatetime()
+                            except:
+                                pass
                     
-                    if not endereco_data['numero']:
-                        numero = base_match.get('Numero')
-                        if pd.notna(numero) and numero:
-                            endereco_data['numero'] = str(numero).strip()
+                    # Preencher dados de endereço da Base Analítica (sempre, mesmo se já tiver algum dado)
+                    # Endereco
+                    endereco = base_match.get('Endereco') or base_match.get('Endereço') or base_match.get('Endereco')
+                    if pd.notna(endereco) and endereco and str(endereco).strip():
+                        endereco_data['endereco'] = str(endereco).strip()
                     
-                    if not endereco_data['complemento']:
-                        complemento = base_match.get('Complemento')
-                        if pd.notna(complemento) and complemento:
-                            endereco_data['complemento'] = str(complemento).strip()
+                    # Numero
+                    numero = base_match.get('Numero') or base_match.get('Número') or base_match.get('Numero')
+                    if pd.notna(numero) and numero and str(numero).strip():
+                        endereco_data['numero'] = str(numero).strip()
                     
-                    if not endereco_data['bairro']:
-                        bairro = base_match.get('Bairro')
-                        if pd.notna(bairro) and bairro:
-                            endereco_data['bairro'] = str(bairro).strip()
+                    # Complemento
+                    complemento = base_match.get('Complemento')
+                    if pd.notna(complemento) and complemento and str(complemento).strip():
+                        endereco_data['complemento'] = str(complemento).strip()
                     
-                    if not endereco_data['ponto_referencia']:
-                        ponto_ref = base_match.get('Ponto Referencia')
-                        if pd.notna(ponto_ref) and ponto_ref:
-                            endereco_data['ponto_referencia'] = str(ponto_ref).strip()
+                    # Bairro
+                    bairro = base_match.get('Bairro')
+                    if pd.notna(bairro) and bairro and str(bairro).strip():
+                        endereco_data['bairro'] = str(bairro).strip()
+                    
+                    # Ponto_Referencia
+                    ponto_ref = base_match.get('Ponto Referencia') or base_match.get('Ponto_Referencia') or base_match.get('Ponto Referência')
+                    if pd.notna(ponto_ref) and ponto_ref and str(ponto_ref).strip():
+                        endereco_data['ponto_referencia'] = str(ponto_ref).strip()
                     
                     if not record.data_venda:
                         data = base_match.get('Data venda') or base_match.get('Data Conectada')
@@ -744,41 +956,47 @@ def gerar_arquivo_homologacao():
         nome_completo = record.nome_cliente or ''
         nome_cliente_formatado = extrair_primeiro_ultimo_nome(nome_completo)
         
-        # Ordem IMUTÁVEL das colunas principais (conforme especificado)
-        # Colunas principais (ordem fixa)
+        # Normalizar telefone (11 dígitos)
+        # Buscar telefone de múltiplas fontes
+        telefone_origem = record.telefone_contato or record.numero_acesso or ""
+        telefone_contato = normalizar_telefone(telefone_origem)
+        
+        # Normalizar CEP (8 dígitos)
+        cep_normalizado = normalizar_cep(record.cep or "")
+        
+        # Normalizar Data_Venda (DD/MM/AAAA) - usar Data Conectada
+        data_venda_formatada = normalizar_data_venda(record.data_venda)
+        
+        # Tipo_Comunicacao: usar Template_Triggers, substituir "EM CRIAÇÃO" por "1"
+        template_triggers = record.template or ''
+        tipo_comunicacao = template_triggers
+        if template_triggers.upper() in ['EM CRIAÇÃO', 'EM CRIACAO', 'EM_CRIACAO']:
+            tipo_comunicacao = '1'
+        
+        # Ordem IMUTÁVEL das colunas principais (conforme especificado para Google Sheets)
         row_data = {
-            'Proposta_iSize': record.codigo_externo,
-            'Cpf': record.cpf,
+            'Proposta_iSize': record.codigo_externo or '',
+            'Cpf': record.cpf or '',
             'NomeCliente': nome_cliente_formatado,
-            'Telefone_Contato': record.telefone_contato or record.numero_acesso,
-            'Endereco': endereco_data['endereco'],
-            'Numero': endereco_data['numero'],
-            'Complemento': endereco_data['complemento'],
-            'Bairro': endereco_data['bairro'],
+            'Telefone_Contato': telefone_contato,
+            'Endereco': endereco_data['endereco'] or '',
+            'Numero': endereco_data['numero'] or '',
+            'Complemento': endereco_data['complemento'] or '',
+            'Bairro': endereco_data['bairro'] or '',
             'Cidade': record.cidade or '',
             'UF': record.uf or '',
-            'Cep': record.cep or '',
-            'Ponto_Referencia': endereco_data['ponto_referencia'],
-            'Cod_Rastreio': link_rastreio,  # Link completo
-            'Data_Venda': record.data_venda.strftime('%d/%m/%Y') if record.data_venda else '',
-            'Tipo_Comunicacao': str(template_id),  # Número do template
+            'Cep': cep_normalizado,
+            'Ponto_Referencia': endereco_data['ponto_referencia'] or '',
+            'Cod_Rastreio': link_rastreio or '',
+            'Data_Venda': data_venda_formatada,
+            'Tipo_Comunicacao': tipo_comunicacao,
             'Status_Disparo': 'FALSE',  # Sempre FALSE
             'DataHora_Disparo': '',  # Sempre vazio
         }
         
-        # Colunas auxiliares (para compreensão, vêm depois)
+        # Colunas apenas para homologação (não se aplica à produção) - adicionadas no final
         row_data.update({
-            'Template_Triggers': record.template or '',
-            'Template_ID': template_id,
-            'Template_Nome': template_config.nome_modelo,
-            'Template_Categoria': template_config.categoria,
-            'Template_Cabecalho': template_config.cabecalho,
-            'Template_Variaveis': variaveis_str,
-            'Template_Tem_Botao': 'SIM' if template_config.tem_botao else 'NAO',
-            'Template_Botao_Texto': template_config.botao_texto or '',
-            'Template_Botao_URL': template_config.botao_url or '',
-            'Mensagem_Preview': mensagem_preview,
-            'Regra_ID': record.regra_id or '',
+            'Template_Triggers': template_triggers,
             'O_Que_Aconteceu': record.o_que_aconteceu or '',
             'Acao_Realizar': record.acao_a_realizar or '',
         })
@@ -804,23 +1022,22 @@ def gerar_arquivo_homologacao():
     
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         if homologacao_data:
-            # Definir ordem IMUTÁVEL das colunas
+            # Ordem IMUTÁVEL das colunas principais (para Google Sheets)
             colunas_principais = [
                 'Proposta_iSize', 'Cpf', 'NomeCliente', 'Telefone_Contato',
                 'Endereco', 'Numero', 'Complemento', 'Bairro', 'Cidade', 'UF', 'Cep', 'Ponto_Referencia',
                 'Cod_Rastreio', 'Data_Venda', 'Tipo_Comunicacao', 'Status_Disparo', 'DataHora_Disparo'
             ]
             
-            # Colunas auxiliares (vêm depois)
-            colunas_auxiliares = [
-                'Template_Triggers', 'Template_ID', 'Template_Nome', 'Template_Categoria',
-                'Template_Cabecalho', 'Template_Variaveis', 'Template_Tem_Botao',
-                'Template_Botao_Texto', 'Template_Botao_URL', 'Mensagem_Preview',
-                'Regra_ID', 'O_Que_Aconteceu', 'Acao_Realizar'
+            # Colunas apenas para homologação (não se aplica à produção) - adicionadas no final
+            colunas_homologacao = [
+                'Template_Triggers',
+                'O_Que_Aconteceu',
+                'Acao_Realizar'
             ]
             
             # Ordem completa
-            fieldnames = colunas_principais + colunas_auxiliares
+            fieldnames = colunas_principais + colunas_homologacao
             
             writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=';', extrasaction='ignore')
             writer.writeheader()

@@ -36,8 +36,8 @@ exit /b 1
 
 :python_ok
 
-REM Mudar para o diretório do script
-cd /d "%~dp0"
+REM Mudar para o diretório raiz do projeto (pai de scripts/)
+cd /d "%~dp0.."
 
 :MENU
 cls

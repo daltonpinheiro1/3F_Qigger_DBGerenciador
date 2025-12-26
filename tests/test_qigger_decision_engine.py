@@ -1,16 +1,21 @@
 """
 Testes unitários para a QiggerDecisionEngine
-Testa todas as 23 regras de decisão
+Versão 2.0 - Testa a nova arquitetura com triggers.xlsx
 """
 import pytest
+import tempfile
+import os
 from datetime import datetime
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+import pandas as pd
 
 from src.engine import QiggerDecisionEngine, DecisionResult
+from src.engine.trigger_loader import TriggerLoader
 from src.models.portabilidade import (
     PortabilidadeRecord,
     PortabilidadeStatus,
-    StatusOrdem
+    StatusOrdem,
+    TriggerRule
 )
 
 
@@ -18,321 +23,378 @@ class TestQiggerDecisionEngine:
     """Testes para a QiggerDecisionEngine"""
     
     @pytest.fixture
-    def engine(self):
-        """Fixture para criar uma instância da engine"""
-        return QiggerDecisionEngine()
+    def temp_triggers_xlsx(self):
+        """Fixture para criar um arquivo triggers.xlsx temporário"""
+        # Criar dados de teste
+        data = {
+            'REGRA_ID': [1, 2, 3],
+            'Status do bilhete': ['Portabilidade Cancelada', 'Portado', None],
+            'Operadora doadora': ['VIVO', 'CLARO', None],
+            'Motivo da recusa': ['Rejeição do Cliente via SMS', None, None],
+            'Motivo do cancelamento': ['Rejeição do Cliente via SMS', None, None],
+            'Último bilhete de portabilidade?': ['Sim', 'Sim', 'Sim'],
+            'Motivo de não ter sido consultado': [None, None, 'Cliente sem cadastro'],
+            'Novo status do bilhete': [None, None, None],
+            'Ajustes número de acesso': [None, None, None],
+            'O que aconteceu': ['CANCELADO A PEDIDO CLIENTE', 'BP FECHADO', 'ERRO SIEBEL'],
+            'Ação a ser realizada': ['CANCELADO A PEDIDO CLIENTE', 'POS VENDA PARABENIZAÇÃO', 'VALIDAR GROSS'],
+            'Tipo de mensagem': ['NÃO ENVIAR', 'CONFIRMACAO BP', 'LIBERACAO BONUS'],
+            'Templete': ['-', 'EM CRIAÇÃO', '2'],
+        }
+        df = pd.DataFrame(data)
+        
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as f:
+            temp_path = f.name
+        
+        df.to_excel(temp_path, index=False)
+        yield temp_path
+        
+        # Limpeza
+        os.unlink(temp_path)
+    
+    @pytest.fixture
+    def engine(self, temp_triggers_xlsx):
+        """Fixture para criar uma instância da engine com triggers temporário"""
+        return QiggerDecisionEngine(triggers_path=temp_triggers_xlsx)
     
     @pytest.fixture
     def base_record(self):
         """Fixture para criar um registro base válido"""
         return PortabilidadeRecord(
-            cpf="12345678901",
+            cpf="52998224725",  # CPF válido
             numero_acesso="11987654321",
             numero_ordem="1-1234567890123",
             codigo_externo="250001234",
+            ultimo_bilhete=True,
             registro_valido=True,
-            numero_acesso_valido=True
         )
     
     # ========== TESTES DE VALIDAÇÃO ==========
     
-    def test_rule_01_validar_cpf_valido(self, engine, base_record):
-        """Teste Rule 1: CPF válido"""
-        result = engine._rule_01_validar_cpf(base_record)
+    def test_validate_cpf_valido(self, engine, base_record):
+        """Teste: CPF válido passa validação"""
+        result = engine._validate_cpf(base_record)
         assert result is None
     
-    def test_rule_01_validar_cpf_invalido_tamanho(self, engine, base_record):
-        """Teste Rule 1: CPF inválido - tamanho incorreto"""
+    def test_validate_cpf_invalido_tamanho(self, engine, base_record):
+        """Teste: CPF inválido - tamanho incorreto"""
         base_record.cpf = "123456789"
-        result = engine._rule_01_validar_cpf(base_record)
+        result = engine._validate_cpf(base_record)
         assert result is not None
         assert result.decision == "REJEITAR"
         assert "CPF inválido" in result.details
     
-    def test_rule_01_validar_cpf_invalido_alfanumerico(self, engine, base_record):
-        """Teste Rule 1: CPF inválido - alfanumérico"""
-        base_record.cpf = "1234567890A"
-        result = engine._rule_01_validar_cpf(base_record)
+    def test_validate_cpf_invalido_digitos(self, engine, base_record):
+        """Teste: CPF inválido - dígitos verificadores incorretos"""
+        base_record.cpf = "12345678901"  # CPF com dígitos incorretos
+        result = engine._validate_cpf(base_record)
         assert result is not None
         assert result.decision == "REJEITAR"
     
-    def test_rule_02_validar_numero_acesso_valido(self, engine, base_record):
-        """Teste Rule 2: Número de acesso válido"""
-        result = engine._rule_02_validar_numero_acesso(base_record)
+    def test_validate_numero_acesso_valido(self, engine, base_record):
+        """Teste: Número de acesso válido"""
+        result = engine._validate_numero_acesso(base_record)
         assert result is None
     
-    def test_rule_02_validar_numero_acesso_curto(self, engine, base_record):
-        """Teste Rule 2: Número de acesso muito curto"""
+    def test_validate_numero_acesso_curto(self, engine, base_record):
+        """Teste: Número de acesso muito curto"""
         base_record.numero_acesso = "1198765"
-        result = engine._rule_02_validar_numero_acesso(base_record)
-        assert result is not None
-        assert result.decision == "REJEITAR"
-        assert "11 caracteres" in result.details
-    
-    def test_rule_02_validar_numero_acesso_vazio(self, engine, base_record):
-        """Teste Rule 2: Número de acesso vazio"""
-        base_record.numero_acesso = ""
-        result = engine._rule_02_validar_numero_acesso(base_record)
+        result = engine._validate_numero_acesso(base_record)
         assert result is not None
         assert result.decision == "REJEITAR"
     
-    def test_rule_03_validar_campos_obrigatorios_completos(self, engine, base_record):
-        """Teste Rule 3: Todos os campos obrigatórios presentes"""
-        result = engine._rule_03_validar_campos_obrigatorios(base_record)
+    def test_validate_campos_obrigatorios_completos(self, engine, base_record):
+        """Teste: Todos os campos obrigatórios presentes"""
+        result = engine._validate_campos_obrigatorios(base_record)
         assert result is None
     
-    def test_rule_03_validar_campos_obrigatorios_faltando(self, engine, base_record):
-        """Teste Rule 3: Campos obrigatórios faltando"""
+    def test_validate_campos_obrigatorios_faltando(self, engine, base_record):
+        """Teste: Campos obrigatórios faltando"""
         base_record.cpf = ""
-        result = engine._rule_03_validar_campos_obrigatorios(base_record)
+        result = engine._validate_campos_obrigatorios(base_record)
         assert result is not None
         assert result.decision == "REJEITAR"
         assert "CPF" in result.details
     
-    def test_rule_22_validar_datas_consistentes(self, engine, base_record):
-        """Teste Rule 22: Datas consistentes"""
-        base_record.data_portabilidade = datetime(2025, 12, 10)
-        base_record.data_final_processamento = datetime(2025, 12, 11)
-        result = engine._rule_22_validar_datas(base_record)
-        assert result is None
+    # ========== TESTES DE MATCHING COM TRIGGERS ==========
     
-    def test_rule_22_validar_datas_inconsistentes(self, engine, base_record):
-        """Teste Rule 22: Datas inconsistentes"""
-        base_record.data_portabilidade = datetime(2025, 12, 11)
-        base_record.data_final_processamento = datetime(2025, 12, 10)
-        result = engine._rule_22_validar_datas(base_record)
-        assert result is not None
-        assert result.decision == "AVISAR"
-    
-    # ========== TESTES DE STATUS ==========
-    
-    def test_rule_04_cliente_sem_cadastro(self, engine, base_record):
-        """Teste Rule 4: Cliente sem cadastro"""
-        base_record.motivo_nao_consultado = "Cliente sem cadastro"
-        result = engine._rule_04_cliente_sem_cadastro(base_record)
-        assert result is not None
-        assert result.decision == "PENDENTE"
-        assert "cadastro" in result.details.lower()
-    
-    def test_rule_05_portabilidade_cancelada(self, engine, base_record):
-        """Teste Rule 5: Portabilidade cancelada"""
+    def test_process_record_com_match(self, engine, base_record):
+        """Teste: Processar registro com regra correspondente"""
         base_record.status_bilhete = PortabilidadeStatus.CANCELADA
-        base_record.motivo_cancelamento = "Cancelamento pelo Cliente"
-        result = engine._rule_05_portabilidade_cancelada(base_record)
-        assert result is not None
-        assert result.decision == "CANCELAR"
-        assert result.priority == 2
-    
-    def test_rule_06_portabilidade_pendente(self, engine, base_record):
-        """Teste Rule 6: Portabilidade pendente"""
-        base_record.status_bilhete = PortabilidadeStatus.PENDENTE
-        base_record.data_portabilidade = datetime(2025, 12, 15)
-        result = engine._rule_06_portabilidade_pendente(base_record)
-        assert result is not None
-        assert result.decision == "MONITORAR"
-        assert result.priority == 4
-    
-    def test_rule_07_portabilidade_concluida(self, engine, base_record):
-        """Teste Rule 7: Portabilidade concluída"""
-        base_record.status_bilhete = PortabilidadeStatus.CONCLUIDA
-        base_record.data_portabilidade = datetime(2025, 12, 10)
-        result = engine._rule_07_portabilidade_concluida(base_record)
-        assert result is not None
-        assert result.decision == "CONCLUIR"
-        assert result.priority == 2
-    
-    def test_rule_08_conflito_detectado(self, engine, base_record):
-        """Teste Rule 8: Conflito detectado"""
-        base_record.status_bilhete = PortabilidadeStatus.CONFLITO
         base_record.operadora_doadora = "VIVO"
-        result = engine._rule_08_conflito_detectado(base_record)
-        assert result is not None
-        assert result.decision == "RESOLVER_CONFLITO"
-        assert result.priority == 2
-    
-    def test_rule_09_falha_parcial(self, engine, base_record):
-        """Teste Rule 9: Falha parcial"""
-        base_record.status_bilhete = PortabilidadeStatus.FALHA_PARCIAL
-        base_record.data_conclusao_ordem = datetime(2025, 12, 10)
-        result = engine._rule_09_falha_parcial(base_record)
-        assert result is not None
-        assert result.decision == "REPROCESSAR"
-        assert result.priority == 3
-    
-    def test_rule_10_erro_aprovisionamento(self, engine, base_record):
-        """Teste Rule 10: Erro no aprovisionamento"""
-        base_record.status_ordem = StatusOrdem.ERRO_APROVISIONAMENTO
-        result = engine._rule_10_erro_aprovisionamento(base_record)
-        assert result is not None
-        assert result.decision == "CORRIGIR_APROVISIONAMENTO"
-        assert result.priority == 2
-    
-    def test_rule_11_erro_sistema(self, engine, base_record):
-        """Teste Rule 11: Erro do sistema"""
-        base_record.motivo_nao_consultado = "[Sistema] Não foi possível processar esse registro."
-        result = engine._rule_11_erro_sistema(base_record)
-        assert result is not None
-        assert result.decision == "REPROCESSAR"
-        assert result.priority == 2
-    
-    def test_rule_12_sem_bilhete_portabilidade(self, engine, base_record):
-        """Teste Rule 12: Sem bilhete de portabilidade"""
-        base_record.motivo_nao_consultado = "Nenhum bilhete de portabilidade encontrado"
-        result = engine._rule_12_sem_bilhete_portabilidade(base_record)
-        assert result is not None
-        assert result.decision == "PESQUISAR"
-        assert result.priority == 4
-    
-    def test_rule_18_portabilidade_suspensa(self, engine, base_record):
-        """Teste Rule 18: Portabilidade suspensa"""
-        base_record.status_bilhete = PortabilidadeStatus.SUSPENSA
-        base_record.data_portabilidade = datetime(2025, 12, 10)
-        result = engine._rule_18_portabilidade_suspensa(base_record)
-        assert result is not None
-        assert result.decision == "INVESTIGAR"
-        assert result.priority == 3
-    
-    def test_rule_19_ordem_concluida(self, engine, base_record):
-        """Teste Rule 19: Ordem concluída"""
-        base_record.status_ordem = StatusOrdem.CONCLUIDO
-        base_record.preco_ordem = "R$29,99"
-        base_record.data_conclusao_ordem = datetime(2025, 12, 10)
-        result = engine._rule_19_ordem_concluida(base_record)
-        assert result is not None
-        assert result.decision == "ARQUIVAR"
-        assert result.priority == 5
-    
-    def test_rule_20_ordem_pendente(self, engine, base_record):
-        """Teste Rule 20: Ordem pendente"""
-        base_record.status_ordem = StatusOrdem.PENDENTE
-        result = engine._rule_20_ordem_pendente(base_record)
-        assert result is not None
-        assert result.decision == "AGUARDAR"
-        assert result.priority == 4
-    
-    def test_rule_21_em_aprovisionamento(self, engine, base_record):
-        """Teste Rule 21: Em aprovisionamento"""
-        base_record.status_ordem = StatusOrdem.EM_APROVISIONAMENTO
-        result = engine._rule_21_em_aprovisionamento(base_record)
-        assert result is not None
-        assert result.decision == "MONITORAR"
-        assert result.priority == 4
-    
-    # ========== TESTES DE MOTIVOS ==========
-    
-    def test_rule_13_motivo_recusa_cliente(self, engine, base_record):
-        """Teste Rule 13: Rejeição do cliente via SMS"""
         base_record.motivo_recusa = "Rejeição do Cliente via SMS"
-        result = engine._rule_13_motivo_recusa_cliente(base_record)
-        assert result is not None
-        assert result.decision == "CANCELAR"
-        assert result.priority == 2
+        base_record.motivo_cancelamento = "Rejeição do Cliente via SMS"
+        
+        results = engine.process_record(base_record, save_to_db=False)
+        
+        # Deve ter encontrado match
+        trigger_results = [r for r in results if r.rule_name.startswith('trigger_rule_')]
+        assert len(trigger_results) > 0
+        
+        # Verificar dados do match
+        trigger_result = trigger_results[0]
+        assert trigger_result.o_que_aconteceu == "CANCELADO A PEDIDO CLIENTE"
+        assert trigger_result.acao_a_realizar == "CANCELADO A PEDIDO CLIENTE"
+        assert trigger_result.mapeado is True
     
-    def test_rule_14_motivo_cancelamento_automatico(self, engine, base_record):
-        """Teste Rule 14: Cancelamento automático pela BDR"""
-        base_record.motivo_cancelamento = "Cancelamento Automático pela BDR"
-        result = engine._rule_14_motivo_cancelamento_automatico(base_record)
-        assert result is not None
-        assert result.decision == "CANCELAR"
-        assert result.priority == 2
+    def test_process_record_sem_match(self, engine, base_record):
+        """Teste: Processar registro sem regra correspondente"""
+        base_record.status_bilhete = PortabilidadeStatus.SUSPENSA  # Status não mapeado
+        base_record.operadora_doadora = "OPERADORA_DESCONHECIDA"
+        
+        results = engine.process_record(base_record, save_to_db=False)
+        
+        # Deve ter resultado como não mapeado
+        unmapped_results = [r for r in results if r.rule_name == 'unmapped']
+        assert len(unmapped_results) > 0
+        
+        unmapped = unmapped_results[0]
+        assert unmapped.o_que_aconteceu == "NÃO MAPEADO"
+        assert unmapped.mapeado is False
     
-    def test_rule_15_cpf_invalido(self, engine, base_record):
-        """Teste Rule 15: CPF inválido"""
-        base_record.motivo_recusa = "CPF Inválido"
-        result = engine._rule_15_cpf_invalido(base_record)
-        assert result is not None
-        assert result.decision == "CORRIGIR"
-        assert result.priority == 2
+    def test_process_record_portabilidade_concluida(self, engine, base_record):
+        """Teste: Processar registro de portabilidade concluída"""
+        base_record.status_bilhete = PortabilidadeStatus.CONCLUIDA
+        base_record.operadora_doadora = "CLARO"
+        
+        results = engine.process_record(base_record, save_to_db=False)
+        
+        trigger_results = [r for r in results if r.rule_name.startswith('trigger_rule_')]
+        assert len(trigger_results) > 0
+        
+        trigger_result = trigger_results[0]
+        assert trigger_result.o_que_aconteceu == "BP FECHADO"
     
-    def test_rule_16_numero_vago(self, engine, base_record):
-        """Teste Rule 16: Portabilidade de número vago"""
-        base_record.motivo_recusa = "Portabillidade de Número Vago"
-        result = engine._rule_16_numero_vago(base_record)
-        assert result is not None
-        assert result.decision == "REJEITAR"
-        assert result.priority == 2
+    def test_process_record_cliente_sem_cadastro(self, engine, base_record):
+        """Teste: Processar registro com erro de cadastro"""
+        base_record.motivo_nao_consultado = "Cliente sem cadastro"
+        
+        results = engine.process_record(base_record, save_to_db=False)
+        
+        trigger_results = [r for r in results if r.rule_name.startswith('trigger_rule_')]
+        assert len(trigger_results) > 0
+        
+        trigger_result = trigger_results[0]
+        assert trigger_result.o_que_aconteceu == "ERRO SIEBEL"
+        assert trigger_result.acao_a_realizar == "VALIDAR GROSS"
     
-    def test_rule_17_sem_resposta_sms(self, engine, base_record):
-        """Teste Rule 17: Sem resposta do SMS"""
-        base_record.motivo_recusa = "Sem Resposta do SMS do Cliente"
-        result = engine._rule_17_sem_resposta_sms(base_record)
-        assert result is not None
-        assert result.decision == "REAGENDAR"
-        assert result.priority == 3
+    # ========== TESTES DE DECISION RESULT ==========
     
-    # ========== TESTES ESPECIAIS ==========
-    
-    def test_rule_23_priorizar_ultimo_bilhete(self, engine, base_record):
-        """Teste Rule 23: Priorizar último bilhete"""
-        base_record.ultimo_bilhete = True
-        result = engine._rule_23_priorizar_ultimo_bilhete(base_record)
-        assert result is not None
-        assert result.decision == "PRIORIZAR"
-        assert result.priority == 1  # Máxima prioridade
-    
-    # ========== TESTES DE INTEGRAÇÃO ==========
-    
-    def test_process_record_multiplas_regras(self, engine, base_record):
-        """Teste: Processar registro com múltiplas regras aplicáveis"""
+    def test_decision_result_estrutura(self, engine, base_record):
+        """Teste: Estrutura do DecisionResult"""
         base_record.status_bilhete = PortabilidadeStatus.CANCELADA
-        base_record.motivo_cancelamento = "Cancelamento pelo Cliente"
-        base_record.ultimo_bilhete = True
+        base_record.operadora_doadora = "VIVO"
+        base_record.motivo_recusa = "Rejeição do Cliente via SMS"
+        base_record.motivo_cancelamento = "Rejeição do Cliente via SMS"
         
-        results = engine.process_record(base_record)
+        results = engine.process_record(base_record, save_to_db=False)
         
-        # Deve aplicar múltiplas regras
-        assert len(results) > 1
+        for result in results:
+            assert hasattr(result, 'rule_name')
+            assert hasattr(result, 'decision')
+            assert hasattr(result, 'action')
+            assert hasattr(result, 'details')
+            assert hasattr(result, 'priority')
+            assert hasattr(result, 'regra_id')
+            assert hasattr(result, 'o_que_aconteceu')
+            assert hasattr(result, 'acao_a_realizar')
+            assert hasattr(result, 'tipo_mensagem')
+            assert hasattr(result, 'template')
+            assert hasattr(result, 'mapeado')
+    
+    def test_decision_results_ordenados_por_prioridade(self, engine, base_record):
+        """Teste: Resultados ordenados por prioridade"""
+        base_record.cpf = ""  # Vai gerar erro de validação
         
-        # Verificar que as regras foram aplicadas
-        rule_names = [r.rule_name for r in results]
-        assert 'rule_05_portabilidade_cancelada' in rule_names
-        assert 'rule_23_priorizar_ultimo_bilhete' in rule_names
+        results = engine.process_record(base_record, save_to_db=False)
         
-        # Verificar ordenação por prioridade
         priorities = [r.priority for r in results]
         assert priorities == sorted(priorities)
     
-    def test_get_applicable_rules(self, engine, base_record):
-        """Teste: Obter lista de regras aplicáveis"""
-        base_record.status_bilhete = PortabilidadeStatus.CANCELADA
-        base_record.ultimo_bilhete = True
-        
-        applicable = engine.get_applicable_rules(base_record)
-        
-        assert len(applicable) > 0
-        assert 'rule_05_portabilidade_cancelada' in applicable
-        assert 'rule_23_priorizar_ultimo_bilhete' in applicable
+    # ========== TESTES DE INTEGRAÇÃO ==========
     
-    def test_all_23_rules_registered(self, engine):
-        """Teste: Verificar que todas as 23 regras estão registradas"""
-        assert len(engine.rules_registry) == 23
+    def test_get_rules_stats(self, engine):
+        """Teste: Obter estatísticas das regras"""
+        stats = engine.get_rules_stats()
         
-        expected_rules = [
-            'rule_01_validar_cpf',
-            'rule_02_validar_numero_acesso',
-            'rule_03_validar_campos_obrigatorios',
-            'rule_04_cliente_sem_cadastro',
-            'rule_05_portabilidade_cancelada',
-            'rule_06_portabilidade_pendente',
-            'rule_07_portabilidade_concluida',
-            'rule_08_conflito_detectado',
-            'rule_09_falha_parcial',
-            'rule_10_erro_aprovisionamento',
-            'rule_11_erro_sistema',
-            'rule_12_sem_bilhete_portabilidade',
-            'rule_13_motivo_recusa_cliente',
-            'rule_14_motivo_cancelamento_automatico',
-            'rule_15_cpf_invalido',
-            'rule_16_numero_vago',
-            'rule_17_sem_resposta_sms',
-            'rule_18_portabilidade_suspensa',
-            'rule_19_ordem_concluida',
-            'rule_20_ordem_pendente',
-            'rule_21_em_aprovisionamento',
-            'rule_22_validar_datas',
-            'rule_23_priorizar_ultimo_bilhete',
-        ]
+        assert 'total_regras' in stats
+        assert stats['total_regras'] == 3  # 3 regras no fixture
+    
+    def test_get_applicable_rules_preview(self, engine, base_record):
+        """Teste: Preview de regra aplicável"""
+        base_record.status_bilhete = PortabilidadeStatus.CONCLUIDA
+        base_record.operadora_doadora = "CLARO"
         
-        for rule in expected_rules:
-            assert rule in engine.rules_registry, f"Regra {rule} não encontrada"
+        rule = engine.get_applicable_rules_preview(base_record)
+        
+        assert rule is not None
+        assert rule.regra_id == 2
+        assert rule.o_que_aconteceu == "BP FECHADO"
+    
+    def test_reload_triggers(self, engine):
+        """Teste: Recarregar regras"""
+        # Não deve dar erro
+        engine.reload_triggers()
+        
+        stats = engine.get_rules_stats()
+        assert stats['total_regras'] == 3
 
+
+class TestTriggerLoader:
+    """Testes para o TriggerLoader"""
+    
+    @pytest.fixture
+    def temp_triggers_xlsx(self):
+        """Fixture para criar um arquivo triggers.xlsx temporário"""
+        data = {
+            'REGRA_ID': [1, 2],
+            'Status do bilhete': ['Portabilidade Cancelada', 'Portado'],
+            'Operadora doadora': ['VIVO', 'CLARO'],
+            'Motivo da recusa': [None, None],
+            'Motivo do cancelamento': [None, None],
+            'Último bilhete de portabilidade?': ['Sim', 'Sim'],
+            'Motivo de não ter sido consultado': [None, None],
+            'Novo status do bilhete': [None, None],
+            'Ajustes número de acesso': [None, None],
+            'O que aconteceu': ['CANCELAMENTO', 'PORTADO'],
+            'Ação a ser realizada': ['REABERTURA', 'PARABENIZAÇÃO'],
+            'Tipo de mensagem': ['LIBERACAO', 'CONFIRMACAO'],
+            'Templete': ['1', '2'],
+        }
+        df = pd.DataFrame(data)
+        
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as f:
+            temp_path = f.name
+        
+        df.to_excel(temp_path, index=False)
+        yield temp_path
+        
+        os.unlink(temp_path)
+    
+    def test_load_rules(self, temp_triggers_xlsx):
+        """Teste: Carregar regras do xlsx"""
+        loader = TriggerLoader(temp_triggers_xlsx)
+        rules = loader.load_rules()
+        
+        assert len(rules) == 2
+        assert rules[0].regra_id == 1
+        assert rules[1].regra_id == 2
+    
+    def test_find_matching_rule(self, temp_triggers_xlsx):
+        """Teste: Encontrar regra correspondente"""
+        loader = TriggerLoader(temp_triggers_xlsx)
+        loader.load_rules()
+        
+        record = PortabilidadeRecord(
+            cpf="12345678901",
+            numero_acesso="11987654321",
+            numero_ordem="1-123",
+            codigo_externo="123",
+            status_bilhete=PortabilidadeStatus.CONCLUIDA,
+            operadora_doadora="CLARO",
+            ultimo_bilhete=True,
+        )
+        
+        rule = loader.find_matching_rule(record)
+        
+        assert rule is not None
+        assert rule.regra_id == 2
+        assert rule.o_que_aconteceu == "PORTADO"
+    
+    def test_find_matching_rule_sem_match(self, temp_triggers_xlsx):
+        """Teste: Não encontrar regra correspondente"""
+        loader = TriggerLoader(temp_triggers_xlsx)
+        loader.load_rules()
+        
+        record = PortabilidadeRecord(
+            cpf="12345678901",
+            numero_acesso="11987654321",
+            numero_ordem="1-123",
+            codigo_externo="123",
+            status_bilhete=PortabilidadeStatus.SUSPENSA,  # Status não mapeado
+            operadora_doadora="OPERADORA_NOVA",
+            ultimo_bilhete=True,
+        )
+        
+        rule = loader.find_matching_rule(record)
+        
+        assert rule is None
+    
+    def test_get_rule_by_id(self, temp_triggers_xlsx):
+        """Teste: Buscar regra por ID"""
+        loader = TriggerLoader(temp_triggers_xlsx)
+        loader.load_rules()
+        
+        rule = loader.get_rule_by_id(1)
+        
+        assert rule is not None
+        assert rule.regra_id == 1
+        assert rule.status_bilhete == "Portabilidade Cancelada"
+    
+    def test_get_rules_stats(self, temp_triggers_xlsx):
+        """Teste: Estatísticas das regras"""
+        loader = TriggerLoader(temp_triggers_xlsx)
+        loader.load_rules()
+        
+        stats = loader.get_rules_stats()
+        
+        assert stats['total_regras'] == 2
+        assert 'por_tipo_mensagem' in stats
+        assert 'por_acao' in stats
+
+
+class TestTriggerRule:
+    """Testes para o modelo TriggerRule"""
+    
+    def test_from_dict(self):
+        """Teste: Criar TriggerRule a partir de dicionário"""
+        data = {
+            'REGRA_ID': 1,
+            'Status do bilhete': 'Portado',
+            'Operadora doadora': 'VIVO',
+            'Último bilhete de portabilidade?': 'Sim',
+            'O que aconteceu': 'BP FECHADO',
+            'Ação a ser realizada': 'PARABENIZAÇÃO',
+            'Tipo de mensagem': 'CONFIRMACAO',
+            'Templete': '1',
+        }
+        
+        rule = TriggerRule.from_dict(data)
+        
+        assert rule.regra_id == 1
+        assert rule.status_bilhete == 'Portado'
+        assert rule.operadora_doadora == 'VIVO'
+        assert rule.ultimo_bilhete is True
+        assert rule.o_que_aconteceu == 'BP FECHADO'
+    
+    def test_to_dict(self):
+        """Teste: Converter TriggerRule para dicionário"""
+        rule = TriggerRule(
+            regra_id=1,
+            status_bilhete='Portado',
+            operadora_doadora='VIVO',
+            o_que_aconteceu='BP FECHADO',
+        )
+        
+        data = rule.to_dict()
+        
+        assert data['regra_id'] == 1
+        assert data['status_bilhete'] == 'Portado'
+        assert data['operadora_doadora'] == 'VIVO'
+        assert data['o_que_aconteceu'] == 'BP FECHADO'
+    
+    def test_clean_nan_values(self):
+        """Teste: Limpar valores NaN"""
+        import math
+        
+        data = {
+            'REGRA_ID': 1,
+            'Status do bilhete': float('nan'),  # NaN value
+            'Operadora doadora': 'VIVO',
+            'O que aconteceu': 'TESTE',
+        }
+        
+        rule = TriggerRule.from_dict(data)
+        
+        assert rule.status_bilhete is None  # NaN deve ser convertido para None
+        assert rule.operadora_doadora == 'VIVO'

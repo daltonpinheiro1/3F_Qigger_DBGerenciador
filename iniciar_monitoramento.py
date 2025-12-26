@@ -1,9 +1,13 @@
 """
 Script para iniciar o monitoramento com as configurações corretas
+Versão 2.0 - Com suporte a triggers.xlsx
 """
 import sys
 import logging
 from pathlib import Path
+
+# Caminho para o arquivo de triggers
+TRIGGERS_PATH = Path(__file__).parent / "triggers.xlsx"
 
 # Tentar carregar configurações
 try:
@@ -16,6 +20,7 @@ except ImportError:
         'GOOGLE_DRIVE_PATH': r"G:\Meu Drive\Retornos_Qigger",
         'BACKOFFICE_PATH': r"\\files\07 Backoffice\RETORNOS RPA - QIGGER\GERENCIAMENTO",
         'DB_PATH': "data/portabilidade.db",
+        'TRIGGERS_PATH': str(TRIGGERS_PATH),
         'DELETE_AFTER_PROCESS': True,
         'BATCH_SIZE': 100,
         'RECURSIVE_MONITORING': True,
@@ -50,18 +55,30 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Inicia o monitoramento"""
+    # Determinar triggers_path
+    triggers_path = config.get('TRIGGERS_PATH', str(TRIGGERS_PATH))
+    
     logger.info("=" * 70)
     logger.info("3F Qigger DB Gerenciador - Monitoramento Automático")
+    logger.info("Versão 2.0 - Com suporte a triggers.xlsx")
     logger.info("=" * 70)
     logger.info("")
     logger.info("Configurações:")
     logger.info(f"  Monitor: {config['MONITOR_FOLDER']}")
+    logger.info(f"  Triggers: {triggers_path}")
     logger.info(f"  Google Drive: {config['GOOGLE_DRIVE_PATH']}")
     logger.info(f"  Backoffice: {config['BACKOFFICE_PATH']}")
     logger.info(f"  Banco de dados: {config['DB_PATH']}")
     logger.info(f"  Deletar após processar: {config['DELETE_AFTER_PROCESS']}")
     logger.info(f"  Tamanho do lote: {config['BATCH_SIZE']}")
     logger.info("")
+    
+    # Verificar se triggers.xlsx existe
+    if not Path(triggers_path).exists():
+        logger.error(f"Arquivo triggers.xlsx não encontrado: {triggers_path}")
+        logger.error("Por favor, verifique se o arquivo existe na pasta do projeto.")
+        sys.exit(1)
+    
     logger.info("Pressione Ctrl+C para parar o monitoramento...")
     logger.info("")
     
@@ -84,7 +101,8 @@ def main():
             google_drive_path=config['GOOGLE_DRIVE_PATH'],
             backoffice_path=config['BACKOFFICE_PATH'],
             delete_after_process=config['DELETE_AFTER_PROCESS'],
-            recursive=config['RECURSIVE_MONITORING']
+            recursive=config['RECURSIVE_MONITORING'],
+            triggers_path=triggers_path
         )
         
         monitor.start()
