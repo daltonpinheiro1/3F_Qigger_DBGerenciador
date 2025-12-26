@@ -221,7 +221,8 @@ def process_csv_file(
             csv_path_obj,
             success=success,
             records=records,
-            results_map=results_map
+            results_map=results_map,
+            objects_loader=objects_loader
         )
         if result['copied_to']:
             logger.info(f"Planilhas geradas/copiadas para {len(result['copied_to'])} destino(s)")

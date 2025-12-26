@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
+from collections import defaultdict
 import uuid
 
 from src.models.portabilidade import PortabilidadeRecord, PortabilidadeStatus, StatusOrdem
@@ -195,22 +196,25 @@ class CSVGenerator:
     def generate_aprovisionamentos_csv(
         records: List[PortabilidadeRecord],
         results_map: Dict[str, List['DecisionResult']],
-        output_path: Path
+        output_path: Path,
+        objects_loader=None
     ) -> bool:
         """
         Gera planilha de Aprovisionamentos para Backoffice
-        Contém apenas casos aprovados/provisionados
+        Formato completo com todas as colunas do CSV original
+        Filtro: Em aprovisionamento E (entregue OU status 6)
         
         Args:
             records: Lista de registros processados
             results_map: Dicionário mapeando CPF+Ordem para resultados
             output_path: Caminho do arquivo de saída
+            objects_loader: Loader de objetos para verificar status de entrega (opcional)
             
         Returns:
             True se gerado com sucesso
         """
         try:
-            # Filtrar apenas casos aprovados/provisionados
+            # Filtrar casos de aprovisionamento E entregue
             aprovisionados = []
             
             for record in records:
@@ -230,11 +234,6 @@ class CSVGenerator:
                 results = results_map.get(key, [])
                 
                 for result in results:
-                    # Decisões que indicam aprovisionamento
-                    if result.decision in ['APROVISIONAR', 'CORRIGIR_APROVISIONAMENTO', 'REPROCESSAR']:
-                        is_aprovisionado = True
-                        break
-                    
                     # Regras específicas de aprovisionamento
                     if 'rule_10_erro_aprovisionamento' in result.rule_name:
                         is_aprovisionado = True
@@ -244,39 +243,83 @@ class CSVGenerator:
                         is_aprovisionado = True
                         break
                 
-                if is_aprovisionado:
+                if not is_aprovisionado:
+                    continue
+                
+                # Verificar se está entregue (regra: entregue OU status 6)
+                is_entregue = False
+                
+                # Verificar status de logística (status_logistica pode conter "6" ou "Pedido entregue")
+                if record.status_logistica:
+                    status_str = str(record.status_logistica).lower()
+                    if '6' in status_str or 'entregue' in status_str or 'entreg' in status_str:
+                        is_entregue = True
+                
+                # Verificar no ObjectsLoader se disponível
+                if not is_entregue and objects_loader:
+                    obj_match = objects_loader.find_best_match(
+                        codigo_externo=record.codigo_externo,
+                        cpf=record.cpf
+                    )
+                    if obj_match:
+                        # Verificar data de entrega
+                        if hasattr(obj_match, 'data_entrega') and obj_match.data_entrega:
+                            is_entregue = True
+                        
+                        # Verificar status (6 ou "Pedido entregue")
+                        if hasattr(obj_match, 'status') and obj_match.status:
+                            status_str = str(obj_match.status).lower()
+                            if '6' in status_str or 'entregue' in status_str or 'entreg' in status_str:
+                                is_entregue = True
+                
+                # Aplicar filtro: aprovisionamento E entregue
+                if is_aprovisionado and is_entregue:
                     aprovisionados.append(record)
             
             if not aprovisionados:
-                logger.info("Nenhum caso de aprovisionamento encontrado")
+                logger.info("Nenhum caso de aprovisionamento com entrega encontrado")
                 return False
             
-            # Gerar CSV
+            # Gerar CSV com todas as colunas do modelo original
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
             with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f, delimiter=';')
                 
-                # Cabeçalho
+                # Cabeçalho completo conforme modelo
                 headers = [
-                    'CPF',
-                    'Numero_Acesso',
-                    'Numero_Ordem',
-                    'Codigo_Externo',
-                    'Cod_Rastreio',  # Link de rastreio https://tim.trakin.co/o/{pedido}
-                    'Status_Bilhete',
-                    'Status_Ordem',
-                    'Operadora_Doadora',
-                    'Data_Portabilidade',
-                    'Preco_Ordem',
-                    'Motivo_Recusa',
-                    'Motivo_Cancelamento',
-                    'Decisoes_Aplicadas',
-                    'Acoes_Recomendadas'
+                    'Cpf',
+                    'Número de acesso',
+                    'Número da ordem',
+                    'Código externo',
+                    'ToutBox',
+                    'Número do bilhete',
+                    'Status do bilhete',
+                    'Operadora doadora',
+                    'Data da portabilidade',
+                    'Motivo da recusa',
+                    'Motivo do cancelamento',
+                    'Último bilhete de portabilidade?',
+                    'Status da ordem',
+                    'Preço da ordem',
+                    'Data da conclusão da ordem',
+                    'Motivo de não ter sido consultado',
+                    'Motivo de não ter sido cancelado',
+                    'Motivo de não ter sido aberto',
+                    'Motivo de não ter sido reagendado',
+                    'Novo status do bilhete',
+                    'Nova data da portabilidade',
+                    'Responsável pelo processamento',
+                    'Data inicial do processamento',
+                    'Data final do processamento',
+                    'Registro válido?',
+                    'Ajustes registro',
+                    'Número de acesso válido?',
+                    'Ajustes número de acesso'
                 ]
                 writer.writerow(headers)
                 
-                # Funções auxiliares para tratamento seguro
+                # Funções auxiliares
                 def safe_str(value, default=''):
                     return str(value) if value is not None else default
                 
@@ -285,7 +328,7 @@ class CSVGenerator:
                         return default
                     try:
                         if isinstance(value, datetime):
-                            return value.strftime("%Y-%m-%d %H:%M:%S")
+                            return value.strftime("%d/%m/%Y")
                         return str(value)
                     except:
                         return default
@@ -298,36 +341,43 @@ class CSVGenerator:
                     except:
                         return default
                 
+                def safe_bool(value, default=''):
+                    if value is None:
+                        return default
+                    return 'Sim' if value else 'Não'
+                
                 # Dados
                 for record in aprovisionados:
                     try:
-                        key = f"{record.cpf}_{record.numero_ordem}"
-                        results = results_map.get(key, [])
-                        
-                        # Formatar decisões e ações (tratar valores None)
-                        decisoes = "; ".join([r.decision for r in results if r and r.decision]) if results else ''
-                        acoes = "; ".join([r.action for r in results if r and r.action]) if results else ''
-                        
-                        # Gerar link de rastreio
-                        cod_rastreio = safe_str(record.cod_rastreio)
-                        if not cod_rastreio or not cod_rastreio.startswith('http'):
-                            cod_rastreio = PortabilidadeRecord.gerar_link_rastreio(record.codigo_externo) or ''
-                        
                         row = [
                             safe_str(record.cpf),
                             safe_str(record.numero_acesso),
                             safe_str(record.numero_ordem),
                             safe_str(record.codigo_externo),
-                            cod_rastreio,  # Link de rastreio
+                            '',  # ToutBox (não temos no modelo)
+                            safe_str(record.numero_bilhete),
                             safe_enum(record.status_bilhete),
-                            safe_enum(record.status_ordem),
                             safe_str(record.operadora_doadora),
                             safe_date(record.data_portabilidade),
-                            safe_str(record.preco_ordem),
                             safe_str(record.motivo_recusa),
                             safe_str(record.motivo_cancelamento),
-                            decisoes,
-                            acoes
+                            safe_bool(record.ultimo_bilhete),
+                            safe_enum(record.status_ordem),
+                            safe_str(record.preco_ordem),
+                            safe_date(record.data_conclusao_ordem),
+                            safe_str(record.motivo_nao_consultado),
+                            safe_str(record.motivo_nao_cancelado),
+                            safe_str(record.motivo_nao_aberto),
+                            safe_str(record.motivo_nao_reagendado),
+                            safe_str(record.novo_status_bilhete),
+                            safe_date(record.nova_data_portabilidade),
+                            safe_str(record.responsavel_processamento),
+                            safe_date(record.data_inicial_processamento),
+                            safe_date(record.data_final_processamento),
+                            safe_bool(record.registro_valido),
+                            safe_str(record.ajustes_registro),
+                            safe_bool(record.numero_acesso_valido),
+                            safe_str(record.ajustes_numero_acesso)
                         ]
                         writer.writerow(row)
                     except Exception as e:
@@ -349,7 +399,7 @@ class CSVGenerator:
     ) -> bool:
         """
         Gera planilha de Reabertura para Backoffice
-        Contém casos com status Cancelado ou Pendente Cancelamento
+        Formato: Agrupa por CPF com múltiplos números de acesso, ordens e códigos externos (até 5)
         
         Args:
             records: Lista de registros processados
@@ -401,90 +451,85 @@ class CSVGenerator:
                 logger.info("Nenhum caso de reabertura encontrado")
                 return False
             
+            # Agrupar por CPF
+            from collections import defaultdict
+            grupos_cpf = defaultdict(list)
+            
+            for record in reabertura:
+                grupos_cpf[record.cpf].append(record)
+            
             # Gerar CSV
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
             with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f, delimiter=';')
+                writer = csv.writer(f, delimiter='\t')  # Usar TAB como delimitador (conforme modelo)
                 
-                # Cabeçalho
+                # Cabeçalho conforme modelo
                 headers = [
-                    'CPF',
-                    'Numero_Acesso',
-                    'Numero_Ordem',
-                    'Codigo_Externo',
-                    'Cod_Rastreio',  # Link de rastreio https://tim.trakin.co/o/{pedido}
-                    'Status_Bilhete',
-                    'Status_Ordem',
-                    'Operadora_Doadora',
-                    'Data_Portabilidade',
-                    'Motivo_Cancelamento',
-                    'Motivo_Recusa',
-                    'Preco_Ordem',
-                    'Decisoes_Aplicadas',
-                    'Acoes_Recomendadas'
+                    'Cpf',
+                    'Plano',
+                    'Preço',
+                    'Número de acesso 1',
+                    'Número de acesso 2',
+                    'Número de acesso 3',
+                    'Número de acesso 4',
+                    'Número de acesso 5',
+                    'Número da ordem 1',
+                    'Número da ordem 2',
+                    'Número da ordem 3',
+                    'Número da ordem 4',
+                    'Número da ordem 5',
+                    'Código externo 1',
+                    'Código externo 2',
+                    'Código externo 3',
+                    'Código externo 4',
+                    'Código externo 5'
                 ]
                 writer.writerow(headers)
                 
-                # Funções auxiliares para tratamento seguro
+                # Funções auxiliares
                 def safe_str(value, default=''):
                     return str(value) if value is not None else default
                 
-                def safe_date(value, default=''):
-                    if value is None:
-                        return default
-                    try:
-                        if isinstance(value, datetime):
-                            return value.strftime("%Y-%m-%d %H:%M:%S")
-                        return str(value)
-                    except:
-                        return default
-                
-                def safe_enum(value, default=''):
-                    if value is None:
-                        return default
-                    try:
-                        return value.value if hasattr(value, 'value') else str(value)
-                    except:
-                        return default
-                
-                # Dados
-                for record in reabertura:
-                    try:
-                        key = f"{record.cpf}_{record.numero_ordem}"
-                        results = results_map.get(key, [])
-                        
-                        # Formatar decisões e ações (tratar valores None)
-                        decisoes = "; ".join([r.decision for r in results if r and r.decision]) if results else ''
-                        acoes = "; ".join([r.action for r in results if r and r.action]) if results else ''
-                        
-                        # Gerar link de rastreio
-                        cod_rastreio = safe_str(record.cod_rastreio)
-                        if not cod_rastreio or not cod_rastreio.startswith('http'):
-                            cod_rastreio = PortabilidadeRecord.gerar_link_rastreio(record.codigo_externo) or ''
-                        
-                        row = [
-                            safe_str(record.cpf),
-                            safe_str(record.numero_acesso),
-                            safe_str(record.numero_ordem),
-                            safe_str(record.codigo_externo),
-                            cod_rastreio,  # Link de rastreio
-                            safe_enum(record.status_bilhete),
-                            safe_enum(record.status_ordem),
-                            safe_str(record.operadora_doadora),
-                            safe_date(record.data_portabilidade),
-                            safe_str(record.motivo_cancelamento),
-                            safe_str(record.motivo_recusa),
-                            safe_str(record.preco_ordem),
-                            decisoes,
-                            acoes
-                        ]
-                        writer.writerow(row)
-                    except Exception as e:
-                        logger.error(f"Erro ao processar registro de reabertura: {e}")
-                        continue
+                # Processar cada grupo de CPF
+                for cpf, registros_cpf in grupos_cpf.items():
+                    # Limitar a 5 registros por CPF
+                    registros_cpf = registros_cpf[:5]
+                    
+                    # Preencher arrays (máximo 5)
+                    numeros_acesso = [safe_str(r.numero_acesso) for r in registros_cpf] + [''] * (5 - len(registros_cpf))
+                    numeros_ordem = [safe_str(r.numero_ordem) for r in registros_cpf] + [''] * (5 - len(registros_cpf))
+                    codigos_externo = [safe_str(r.codigo_externo) for r in registros_cpf] + [''] * (5 - len(registros_cpf))
+                    
+                    # Pegar Plano e Preço do primeiro registro (se disponível)
+                    primeiro = registros_cpf[0]
+                    plano = ''  # Não temos campo Plano no modelo atual
+                    preco = safe_str(primeiro.preco_ordem, '').replace('R$', '').replace(',', '.').strip()
+                    
+                    # Montar linha
+                    row = [
+                        safe_str(cpf),
+                        plano,
+                        preco,
+                        numeros_acesso[0],
+                        numeros_acesso[1],
+                        numeros_acesso[2],
+                        numeros_acesso[3],
+                        numeros_acesso[4],
+                        numeros_ordem[0],
+                        numeros_ordem[1],
+                        numeros_ordem[2],
+                        numeros_ordem[3],
+                        numeros_ordem[4],
+                        codigos_externo[0],
+                        codigos_externo[1],
+                        codigos_externo[2],
+                        codigos_externo[3],
+                        codigos_externo[4]
+                    ]
+                    writer.writerow(row)
             
-            logger.info(f"Planilha Reabertura gerada: {output_path} ({len(reabertura)} registros)")
+            logger.info(f"Planilha Reabertura gerada: {output_path} ({len(grupos_cpf)} CPFs, {len(reabertura)} registros)")
             return True
             
         except Exception as e:

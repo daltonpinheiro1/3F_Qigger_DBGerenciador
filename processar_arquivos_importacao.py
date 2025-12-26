@@ -211,7 +211,8 @@ def processar_arquivos_importacao():
                 arquivo_csv,
                 success=success,
                 records=records,
-                results_map=results_map
+                results_map=results_map,
+                objects_loader=objects_loader
             )
             
             if result['copied_to']:

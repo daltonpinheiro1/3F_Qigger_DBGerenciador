@@ -27,7 +27,7 @@ class FileOutputManager:
         
         Args:
             google_drive_path: Caminho para Google Drive (ex: G:\\Meu Drive\\Retornos_Qigger)
-            backoffice_path: Caminho para Backoffice (ex: \\files\07 Backoffice\RETORNOS RPA - QIGGER\GERENCIAMENTO)
+            backoffice_path: Caminho para Backoffice (ex: \\\\files\\07 Backoffice\\RETORNOS RPA - QIGGER\\GERENCIAMENTO)
         """
         self.google_drive_path = Path(google_drive_path) if google_drive_path else None
         self.backoffice_path = Path(backoffice_path) if backoffice_path else None
@@ -66,7 +66,8 @@ class FileOutputManager:
         source_file: Path,
         success: bool = True,
         records: Optional[List[PortabilidadeRecord]] = None,
-        results_map: Optional[Dict[str, List['DecisionResult']]] = None
+        results_map: Optional[Dict[str, List['DecisionResult']]] = None,
+        objects_loader=None
     ) -> List[str]:
         """
         Copia arquivo processado para os destinos configurados
@@ -77,6 +78,7 @@ class FileOutputManager:
             success: Se True, arquivo foi processado com sucesso; se False, houve erro
             records: Lista de registros processados (opcional, para gerar planilhas específicas)
             results_map: Dicionário mapeando CPF+Ordem para resultados (opcional)
+            objects_loader: Loader de objetos para verificar status de entrega (opcional)
             
         Returns:
             Lista de caminhos onde o arquivo foi copiado/gerado com sucesso
@@ -109,7 +111,7 @@ class FileOutputManager:
             try:
                 # Planilha Aprovisionamentos
                 aprovisionamentos_file = self.backoffice_path / f"Aprovisionamentos_{timestamp}_{source_name}.csv"
-                if CSVGenerator.generate_aprovisionamentos_csv(records, results_map, aprovisionamentos_file):
+                if CSVGenerator.generate_aprovisionamentos_csv(records, results_map, aprovisionamentos_file, objects_loader):
                     copied_paths.append(str(aprovisionamentos_file))
                     logger.info(f"Planilha Aprovisionamentos gerada: {aprovisionamentos_file}")
                 
@@ -176,7 +178,8 @@ class FileOutputManager:
         source_file: Path,
         success: bool = True,
         records: Optional[List[PortabilidadeRecord]] = None,
-        results_map: Optional[Dict[str, List['DecisionResult']]] = None
+        results_map: Optional[Dict[str, List['DecisionResult']]] = None,
+        objects_loader=None
     ) -> dict:
         """
         Processa arquivo completo: copia para outputs e deleta fonte
@@ -186,6 +189,7 @@ class FileOutputManager:
             success: Se processamento foi bem-sucedido
             records: Lista de registros processados (opcional, para gerar planilhas específicas)
             results_map: Dicionário mapeando CPF+Ordem para resultados (opcional)
+            objects_loader: Loader de objetos para verificar status de entrega (opcional)
             
         Returns:
             Dicionário com resultados da operação
@@ -200,7 +204,7 @@ class FileOutputManager:
         
         # Copiar para outputs (gera planilhas específicas se records/results_map fornecidos)
         try:
-            copied_paths = self.copy_to_outputs(source_file, success, records, results_map)
+            copied_paths = self.copy_to_outputs(source_file, success, records, results_map, objects_loader)
             result['copied_to'] = copied_paths
         except Exception as e:
             error_msg = f"Erro ao copiar para outputs: {e}"

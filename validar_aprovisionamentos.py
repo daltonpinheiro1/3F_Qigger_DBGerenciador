@@ -45,10 +45,10 @@ except Exception as e:
 print(f"\nTotal de registros: {len(df)}")
 print(f"Total de colunas: {len(df.columns)}")
 
-# Validar colunas obrigatórias
+# Validar colunas obrigatórias (formato completo com todas as colunas)
 colunas_obrigatorias = [
-    'CPF', 'Numero_Acesso', 'Numero_Ordem', 'Codigo_Externo',
-    'Cod_Rastreio', 'Status_Bilhete', 'Status_Ordem'
+    'Cpf', 'Número de acesso', 'Número da ordem', 'Código externo',
+    'Status do bilhete', 'Status da ordem'
 ]
 
 print("\n" + "=" * 70)
@@ -73,30 +73,18 @@ print("VALIDAÇÃO DE DADOS")
 print("=" * 70)
 
 # CPF
-cpfs_validos = df['CPF'].notna() & (df['CPF'] != '')
+cpfs_validos = df['Cpf'].notna() & (df['Cpf'] != '')
 print(f"CPFs preenchidos: {cpfs_validos.sum()}/{len(df)} ({cpfs_validos.sum()/len(df)*100:.1f}%)")
 
 # Código Externo
-codigos_validos = df['Codigo_Externo'].notna() & (df['Codigo_Externo'] != '')
+codigos_validos = df['Código externo'].notna() & (df['Código externo'] != '')
 print(f"Códigos Externos preenchidos: {codigos_validos.sum()}/{len(df)} ({codigos_validos.sum()/len(df)*100:.1f}%)")
 
-# Links de Rastreio
-links_validos = df['Cod_Rastreio'].notna() & (df['Cod_Rastreio'] != '')
-links_com_http = df['Cod_Rastreio'].astype(str).str.startswith('http')
-print(f"Links de rastreio preenchidos: {links_validos.sum()}/{len(df)}")
-print(f"Links válidos (começam com http): {links_com_http.sum()}/{len(df)}")
-
-# Validar formato de links
-links_invalidos = df[~links_com_http & links_validos]
-if len(links_invalidos) > 0:
-    print(f"\n⚠ {len(links_invalidos)} link(s) sem formato http:")
-    print(links_invalidos[['Codigo_Externo', 'Cod_Rastreio']].head())
-
 # Status
-status_aprovisionamento = df['Status_Ordem'].astype(str).str.contains('Aprovisionamento', case=False, na=False)
-status_bilhete_aprovisionamento = df['Status_Bilhete'].astype(str).str.contains('Aprovisionamento', case=False, na=False)
-print(f"\nRegistros com Status_Ordem 'Em Aprovisionamento': {status_aprovisionamento.sum()}")
-print(f"Registros com Status_Bilhete 'Em Aprovisionamento': {status_bilhete_aprovisionamento.sum()}")
+status_aprovisionamento = df['Status da ordem'].astype(str).str.contains('Aprovisionamento', case=False, na=False)
+status_bilhete_aprovisionamento = df['Status do bilhete'].astype(str).str.contains('Aprovisionamento', case=False, na=False)
+print(f"\nRegistros com Status da ordem 'Em Aprovisionamento': {status_aprovisionamento.sum()}")
+print(f"Registros com Status do bilhete 'Em Aprovisionamento': {status_bilhete_aprovisionamento.sum()}")
 
 # Validar que todos são aprovisionamento
 if len(df) > 0:
@@ -106,14 +94,17 @@ if len(df) > 0:
     if todos_aprovisionamento < len(df):
         nao_aprovisionados = df[~(status_aprovisionamento | status_bilhete_aprovisionamento)]
         print(f"\n⚠ {len(nao_aprovisionados)} registro(s) que não são aprovisionamento:")
-        print(nao_aprovisionados[['CPF', 'Codigo_Externo', 'Status_Bilhete', 'Status_Ordem']].head())
+        print(nao_aprovisionados[['Cpf', 'Código externo', 'Status do bilhete', 'Status da ordem']].head())
 
 # Exemplos
 print("\n" + "=" * 70)
 print("EXEMPLOS DE REGISTROS")
 print("=" * 70)
 print("\nPrimeiros 5 registros:")
-print(df[['CPF', 'Codigo_Externo', 'Status_Bilhete', 'Status_Ordem', 'Cod_Rastreio']].head().to_string())
+colunas_exemplo = ['Cpf', 'Código externo', 'Status do bilhete', 'Status da ordem']
+if 'Número do bilhete' in df.columns:
+    colunas_exemplo.append('Número do bilhete')
+print(df[colunas_exemplo].head().to_string())
 
 print("\n" + "=" * 70)
 print("VALIDAÇÃO CONCLUÍDA")

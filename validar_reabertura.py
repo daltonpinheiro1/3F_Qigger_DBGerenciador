@@ -45,10 +45,12 @@ except Exception as e:
 print(f"\nTotal de registros: {len(df)}")
 print(f"Total de colunas: {len(df.columns)}")
 
-# Validar colunas obrigatórias
+# Validar colunas obrigatórias (formato novo: agrupado por CPF)
 colunas_obrigatorias = [
-    'CPF', 'Numero_Acesso', 'Numero_Ordem', 'Codigo_Externo',
-    'Cod_Rastreio', 'Status_Bilhete', 'Status_Ordem', 'Motivo_Cancelamento'
+    'Cpf',
+    'Número de acesso 1',
+    'Número da ordem 1',
+    'Código externo 1'
 ]
 
 print("\n" + "=" * 70)
@@ -73,49 +75,47 @@ print("VALIDAÇÃO DE DADOS")
 print("=" * 70)
 
 # CPF
-cpfs_validos = df['CPF'].notna() & (df['CPF'] != '')
+cpfs_validos = df['Cpf'].notna() & (df['Cpf'] != '')
 print(f"CPFs preenchidos: {cpfs_validos.sum()}/{len(df)} ({cpfs_validos.sum()/len(df)*100:.1f}%)")
 
-# Código Externo
-codigos_validos = df['Codigo_Externo'].notna() & (df['Codigo_Externo'] != '')
-print(f"Códigos Externos preenchidos: {codigos_validos.sum()}/{len(df)} ({codigos_validos.sum()/len(df)*100:.1f}%)")
+# Código Externo 1 (primeiro código)
+codigos_validos = df['Código externo 1'].notna() & (df['Código externo 1'] != '')
+print(f"Códigos Externos 1 preenchidos: {codigos_validos.sum()}/{len(df)} ({codigos_validos.sum()/len(df)*100:.1f}%)")
 
-# Links de Rastreio
-links_validos = df['Cod_Rastreio'].notna() & (df['Cod_Rastreio'] != '')
-links_com_http = df['Cod_Rastreio'].astype(str).str.startswith('http')
-print(f"Links de rastreio preenchidos: {links_validos.sum()}/{len(df)}")
-print(f"Links válidos (começam com http): {links_com_http.sum()}/{len(df)}")
+# Número de acesso 1
+acessos_validos = df['Número de acesso 1'].notna() & (df['Número de acesso 1'] != '')
+print(f"Números de acesso 1 preenchidos: {acessos_validos.sum()}/{len(df)} ({acessos_validos.sum()/len(df)*100:.1f}%)")
 
-# Validar formato de links
-links_invalidos = df[~links_com_http & links_validos]
-if len(links_invalidos) > 0:
-    print(f"\n⚠ {len(links_invalidos)} link(s) sem formato http:")
-    print(links_invalidos[['Codigo_Externo', 'Cod_Rastreio']].head())
+# Número da ordem 1
+ordens_validas = df['Número da ordem 1'].notna() & (df['Número da ordem 1'] != '')
+print(f"Números da ordem 1 preenchidos: {ordens_validas.sum()}/{len(df)} ({ordens_validas.sum()/len(df)*100:.1f}%)")
 
-# Status Cancelado
-status_cancelado = df['Status_Bilhete'].astype(str).str.contains('Cancelada', case=False, na=False)
-print(f"\nRegistros com Status_Bilhete 'Cancelada': {status_cancelado.sum()}/{len(df)}")
+# Verificar múltiplos registros por CPF
+cpfs_com_multiplos = 0
+for cpf in df['Cpf'].unique():
+    if pd.notna(cpf):
+        registros_cpf = df[df['Cpf'] == cpf]
+        # Verificar se tem mais de um código externo preenchido
+        codigos_preenchidos = sum([
+            1 for i in range(1, 6) 
+            if f'Código externo {i}' in df.columns and 
+            registros_cpf[f'Código externo {i}'].notna().any() and 
+            (registros_cpf[f'Código externo {i}'] != '').any()
+        ])
+        if codigos_preenchidos > 1:
+            cpfs_com_multiplos += 1
 
-# Motivo Cancelamento
-motivos_preenchidos = df['Motivo_Cancelamento'].notna() & (df['Motivo_Cancelamento'] != '')
-print(f"Motivos de Cancelamento preenchidos: {motivos_preenchidos.sum()}/{len(df)}")
-
-# Validar que todos são cancelamento/reabertura
-if len(df) > 0:
-    todos_cancelados = status_cancelado.sum()
-    print(f"Registros cancelados: {todos_cancelados}/{len(df)}")
-    
-    if todos_cancelados < len(df):
-        nao_cancelados = df[~status_cancelado]
-        print(f"\n⚠ {len(nao_cancelados)} registro(s) que não são cancelados:")
-        print(nao_cancelados[['CPF', 'Codigo_Externo', 'Status_Bilhete', 'Motivo_Cancelamento']].head())
+print(f"\nCPFs com múltiplos códigos externos: {cpfs_com_multiplos}")
 
 # Exemplos
 print("\n" + "=" * 70)
 print("EXEMPLOS DE REGISTROS")
 print("=" * 70)
 print("\nPrimeiros 5 registros:")
-print(df[['CPF', 'Codigo_Externo', 'Status_Bilhete', 'Motivo_Cancelamento', 'Cod_Rastreio']].head().to_string())
+colunas_exemplo = ['Cpf', 'Número de acesso 1', 'Número da ordem 1', 'Código externo 1']
+if 'Preço' in df.columns:
+    colunas_exemplo.append('Preço')
+print(df[colunas_exemplo].head().to_string())
 
 print("\n" + "=" * 70)
 print("VALIDAÇÃO CONCLUÍDA")
