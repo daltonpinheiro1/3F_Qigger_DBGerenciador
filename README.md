@@ -145,9 +145,21 @@ python main.py --list-rules
 
 ### Gerar Arquivo de Homologação WPP
 
+**Windows (PowerShell/CMD):**
 ```bash
-python gerar_homologacao_wpp.py
+# Usando script .bat (recomendado)
+scripts\gerar_homologacao_wpp.bat
+
+# Ou diretamente com Python
+py gerar_homologacao_wpp.py
 ```
+
+**Linux/Mac:**
+```bash
+python3 gerar_homologacao_wpp.py
+```
+
+**Nota:** No Windows, se o comando `python` não funcionar, use `py` (Python Launcher).
 
 Este script gera um arquivo CSV completo de homologação para WhatsApp com:
 - Dados do cliente (CPF, Nome, Telefone, Endereço completo)
