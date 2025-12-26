@@ -171,19 +171,52 @@ Este script gera um arquivo CSV completo de homologação para WhatsApp com:
 
 O arquivo será salvo em `data/homologacao_wpp.csv`.
 
-### Validar Arquivo de Homologação
+### Validar Arquivos de Homologação
 
+**Windows:**
 ```bash
-python validar_homologacao.py
+# Validar homologação WPP
+scripts\validar_homologacao.bat
+# Ou: py validar_homologacao.py
+
+# Validar aprovisionamentos
+scripts\validar_aprovisionamentos.bat
+# Ou: py validar_aprovisionamentos.py
+
+# Validar reabertura
+scripts\validar_reabertura.bat
+# Ou: py validar_reabertura.py
 ```
 
-Valida o arquivo de homologação gerado, verificando:
-- Ordem das colunas
-- Normalização de telefones (11 dígitos)
-- Normalização de CEPs (8 dígitos)
-- Formato de datas (DD/MM/AAAA)
-- Status de disparo (sempre FALSE)
-- Links de rastreio válidos
+**Linux/Mac:**
+```bash
+python3 validar_homologacao.py
+python3 validar_aprovisionamentos.py
+python3 validar_reabertura.py
+```
+
+**Validações realizadas:**
+
+- **Homologação WPP:**
+  - Ordem das colunas
+  - Normalização de telefones (11 dígitos)
+  - Normalização de CEPs (8 dígitos)
+  - Formato de datas (DD/MM/AAAA)
+  - Status de disparo (sempre FALSE)
+  - Links de rastreio válidos
+
+- **Aprovisionamentos:**
+  - Colunas obrigatórias presentes
+  - CPFs e códigos externos preenchidos
+  - Links de rastreio válidos (formato http)
+  - Status de aprovisionamento correto
+
+- **Reabertura:**
+  - Colunas obrigatórias presentes
+  - CPFs e códigos externos preenchidos
+  - Links de rastreio válidos (formato http)
+  - Status de cancelamento correto
+  - Motivos de cancelamento preenchidos
 
 ### Uso Programático
 
