@@ -37,6 +37,8 @@ class ObjectRecord:
     transportadora: Optional[str] = None
     previsao_entrega: Optional[datetime] = None
     data_entrega: Optional[datetime] = None
+    ultima_ocorrencia: Optional[str] = None  # Última Ocorrência do Relatório de Objetos
+    iccid: Optional[str] = None  # ICCID ou chip_id
     
     def to_dict(self) -> dict:
         """Converte para dicionário"""
@@ -209,6 +211,8 @@ class ObjectsLoader:
                 transportadora=self._clean_value(row.get('Transportadora')),
                 previsao_entrega=self._parse_date(row.get('Previsão Entrega')),
                 data_entrega=self._parse_date(row.get('Data Entrega')),
+                ultima_ocorrencia=self._clean_value(row.get('Última Ocorrência') or row.get('Ultima Ocorrencia') or row.get('Última Ocorrência')),
+                iccid=self._clean_value(row.get('ICCID') or row.get('Chip ID') or row.get('chip_id') or row.get('Chip_ID')),
             )
             
         except Exception as e:

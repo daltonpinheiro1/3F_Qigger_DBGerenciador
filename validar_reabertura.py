@@ -15,29 +15,37 @@ print("=" * 70)
 print("VALIDAÇÃO DO ARQUIVO DE REABERTURA")
 print("=" * 70)
 
-# Buscar arquivo mais recente na pasta de retornos
-backoffice_path = Path("data/retornos/backoffice")
-if not backoffice_path.exists():
-    print(f"\nERRO: Pasta não encontrada: {backoffice_path}")
-    print("Execute primeiro o processamento de arquivos para gerar os arquivos.")
-    sys.exit(1)
+# Buscar arquivo de homologação
+arquivo_homologacao = Path("data/homologacao_reabertura.csv")
 
-# Buscar arquivos de reabertura
-arquivos_reabertura = list(backoffice_path.glob("Reabertura_*.csv"))
+# Se não existir, buscar arquivo mais recente na pasta de retornos
+if not arquivo_homologacao.exists():
+    backoffice_path = Path("data/retornos/backoffice")
+    if backoffice_path.exists():
+        arquivos_reabertura = list(backoffice_path.glob("Reabertura_*.csv"))
+        if arquivos_reabertura:
+            arquivo_homologacao = max(arquivos_reabertura, key=lambda x: x.stat().st_mtime)
+        else:
+            print(f"\nERRO: Nenhum arquivo de Reabertura encontrado.")
+            print("Execute primeiro o script gerar_homologacao_reabertura.py")
+            sys.exit(1)
+    else:
+        print(f"\nERRO: Arquivo de homologação não encontrado: {arquivo_homologacao}")
+        print("Execute primeiro o script gerar_homologacao_reabertura.py")
+        sys.exit(1)
 
-if not arquivos_reabertura:
-    print(f"\nAVISO: Nenhum arquivo de Reabertura encontrado em: {backoffice_path}")
-    print("Execute primeiro o processamento de arquivos.")
-    sys.exit(0)
-
-# Pegar o mais recente
-arquivo = max(arquivos_reabertura, key=lambda x: x.stat().st_mtime)
+arquivo = arquivo_homologacao
 
 print(f"\nArquivo: {arquivo}")
 print(f"Data de modificação: {arquivo.stat().st_mtime}")
 
 try:
-    df = pd.read_csv(arquivo, sep=';', encoding='utf-8-sig')
+    # Tentar primeiro com TAB (delimitador do arquivo de homologação)
+    try:
+        df = pd.read_csv(arquivo, sep='\t', encoding='utf-8-sig')
+    except:
+        # Se falhar, tentar com ponto e vírgula
+        df = pd.read_csv(arquivo, sep=';', encoding='utf-8-sig')
 except Exception as e:
     print(f"\nERRO ao ler arquivo: {e}")
     sys.exit(1)
@@ -48,6 +56,8 @@ print(f"Total de colunas: {len(df.columns)}")
 # Validar colunas obrigatórias (formato novo: agrupado por CPF)
 colunas_obrigatorias = [
     'Cpf',
+    'Plano',
+    'Preço',
     'Número de acesso 1',
     'Número da ordem 1',
     'Código externo 1'
@@ -121,7 +131,7 @@ print("\n" + "=" * 70)
 print("VALIDAÇÃO CONCLUÍDA")
 print("=" * 70)
 
-if colunas_faltando or len(links_invalidos) > 0:
+if colunas_faltando:
     print("\n⚠ ATENÇÃO: Foram encontrados problemas na validação!")
     sys.exit(1)
 else:

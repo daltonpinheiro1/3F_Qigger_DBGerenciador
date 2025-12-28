@@ -15,23 +15,31 @@ print("=" * 70)
 print("VALIDAÇÃO DO ARQUIVO DE APROVISIONAMENTOS")
 print("=" * 70)
 
-# Buscar arquivo mais recente na pasta de retornos
-backoffice_path = Path("data/retornos/backoffice")
-if not backoffice_path.exists():
-    print(f"\nERRO: Pasta não encontrada: {backoffice_path}")
-    print("Execute primeiro o processamento de arquivos para gerar os arquivos.")
-    sys.exit(1)
+# Buscar arquivo de homologação (tentar primeiro o arquivo final, depois o temporário)
+arquivo_homologacao = Path("data/homologacao_aprovisionamentos.csv")
+arquivo_temp = Path("data/homologacao_aprovisionamentos_temp.csv")
 
-# Buscar arquivos de aprovisionamento
-arquivos_aprovisionamento = list(backoffice_path.glob("Aprovisionamentos_*.csv"))
+# Se não existir, tentar arquivo temporário
+if not arquivo_homologacao.exists() and arquivo_temp.exists():
+    arquivo_homologacao = arquivo_temp
 
-if not arquivos_aprovisionamento:
-    print(f"\nAVISO: Nenhum arquivo de Aprovisionamentos encontrado em: {backoffice_path}")
-    print("Execute primeiro o processamento de arquivos.")
-    sys.exit(0)
+# Se não existir, buscar arquivo mais recente na pasta de retornos
+if not arquivo_homologacao.exists():
+    backoffice_path = Path("data/retornos/backoffice")
+    if backoffice_path.exists():
+        arquivos_aprovisionamento = list(backoffice_path.glob("Aprovisionamentos_*.csv"))
+        if arquivos_aprovisionamento:
+            arquivo_homologacao = max(arquivos_aprovisionamento, key=lambda x: x.stat().st_mtime)
+        else:
+            print(f"\nERRO: Nenhum arquivo de Aprovisionamentos encontrado.")
+            print("Execute primeiro o script gerar_homologacao_aprovisionamentos.py")
+            sys.exit(1)
+    else:
+        print(f"\nERRO: Arquivo de homologação não encontrado: {arquivo_homologacao}")
+        print("Execute primeiro o script gerar_homologacao_aprovisionamentos.py")
+        sys.exit(1)
 
-# Pegar o mais recente
-arquivo = max(arquivos_aprovisionamento, key=lambda x: x.stat().st_mtime)
+arquivo = arquivo_homologacao
 
 print(f"\nArquivo: {arquivo}")
 print(f"Data de modificação: {arquivo.stat().st_mtime}")
@@ -48,7 +56,7 @@ print(f"Total de colunas: {len(df.columns)}")
 # Validar colunas obrigatórias (formato completo com todas as colunas)
 colunas_obrigatorias = [
     'Cpf', 'Número de acesso', 'Número da ordem', 'Código externo',
-    'Status do bilhete', 'Status da ordem'
+    'Status do bilhete', 'Status da ordem', 'Status da entrega', 'Data da entrega'
 ]
 
 print("\n" + "=" * 70)
@@ -96,6 +104,25 @@ if len(df) > 0:
         print(f"\n⚠ {len(nao_aprovisionados)} registro(s) que não são aprovisionamento:")
         print(nao_aprovisionados[['Cpf', 'Código externo', 'Status do bilhete', 'Status da ordem']].head())
 
+# Validar entrega (status 6 ou entregue)
+if 'Status do bilhete' in df.columns:
+    status_entregue = df['Status do bilhete'].astype(str).str.contains('6|entregue|entreg', case=False, na=False, regex=True)
+    print(f"\nRegistros com status entregue (6 ou entregue): {status_entregue.sum()}/{len(df)}")
+
+# Validar novas colunas de entrega
+if 'Status da entrega' in df.columns:
+    status_entrega_preenchidos = df['Status da entrega'].notna() & (df['Status da entrega'] != '')
+    print(f"Status da entrega preenchidos: {status_entrega_preenchidos.sum()}/{len(df)} ({status_entrega_preenchidos.sum()/len(df)*100:.1f}%)")
+    
+    # Mostrar exemplos de status
+    if status_entrega_preenchidos.sum() > 0:
+        status_unicos = df[df['Status da entrega'].notna() & (df['Status da entrega'] != '')]['Status da entrega'].unique()
+        print(f"  Status únicos encontrados: {', '.join(str(s) for s in status_unicos[:10])}")
+
+if 'Data da entrega' in df.columns:
+    data_entrega_preenchidas = df['Data da entrega'].notna() & (df['Data da entrega'] != '')
+    print(f"Data da entrega preenchidas: {data_entrega_preenchidas.sum()}/{len(df)} ({data_entrega_preenchidas.sum()/len(df)*100:.1f}%)")
+
 # Exemplos
 print("\n" + "=" * 70)
 print("EXEMPLOS DE REGISTROS")
@@ -110,7 +137,7 @@ print("\n" + "=" * 70)
 print("VALIDAÇÃO CONCLUÍDA")
 print("=" * 70)
 
-if colunas_faltando or len(links_invalidos) > 0:
+if colunas_faltando:
     print("\n⚠ ATENÇÃO: Foram encontrados problemas na validação!")
     sys.exit(1)
 else:

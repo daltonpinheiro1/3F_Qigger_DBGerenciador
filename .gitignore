@@ -71,6 +71,17 @@ Thumbs.db
 # Scripts temporários de verificação
 verificar_correcoes.py
 verificar_preenchimento.py
+validar_fallback_numero_os.py
+validar_formato_ordem.py
+validar_colunas_reabertura.py
+verificar_numero_linha.py
+validar_base_analitica_reabertura.py
+validar_numero_acesso_reabertura.py
+verificar_regra_aplicada.py
+validar_tipo_venda.py
+validar_reabertura_preco_regra.py
+validar_reabertura_plano.py
+validar_filtros_aprovisionamento.py
 
 # Arquivos de análise/documentação temporários
 analise_cabecalho_unificado.md
@@ -78,4 +89,7 @@ ESPECIFICACOES_CABECALHO.md
 
 # Arquivos de amostra/teste
 data/amostra_validacao_templates.csv
+
+# Arquivos de dados temporários
+data/C337E030
 
