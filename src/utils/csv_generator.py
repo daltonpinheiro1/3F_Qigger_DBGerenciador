@@ -4,13 +4,14 @@ Gerador de planilhas CSV específicas para Google Drive e Backoffice
 import csv
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, TYPE_CHECKING
 from datetime import datetime
 from collections import defaultdict
 import uuid
 
+import pandas as pd
+
 from src.models.portabilidade import PortabilidadeRecord, PortabilidadeStatus, StatusOrdem
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.engine.qigger_decision_engine import DecisionResult
@@ -421,7 +422,6 @@ class CSVGenerator:
                 
                 # PRIORIDADE 3: Verificar ICCID na Base Analítica (se possui ICCID, considera entregue)
                 if not is_entregue and base_analitica_loader and hasattr(base_analitica_loader, 'is_loaded') and base_analitica_loader.is_loaded:
-                    import pandas as pd
                     base_match = base_analitica_loader.find_by_codigo_externo(record.codigo_externo)
                     if base_match is None and record.cpf:
                         if hasattr(base_analitica_loader, 'find_by_cpf'):
