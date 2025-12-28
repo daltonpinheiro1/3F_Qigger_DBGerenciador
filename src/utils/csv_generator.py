@@ -18,6 +18,108 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def sintetizar_texto(texto: str, max_caracteres: int = 80) -> str:
+    """
+    Sintetiza texto longo para melhor visualização no Excel
+    Remove quebras de linha, espaços múltiplos e torna o texto mais objetivo
+    
+    Args:
+        texto: Texto a ser sintetizado
+        max_caracteres: Número máximo de caracteres (padrão: 80)
+        
+    Returns:
+        Texto sintetizado e limpo
+    """
+    if not texto:
+        return ''
+    
+    texto_str = str(texto).strip()
+    
+    # Remover quebras de linha e caracteres de controle
+    texto_str = texto_str.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    
+    # Remover espaços múltiplos
+    while '  ' in texto_str:
+        texto_str = texto_str.replace('  ', ' ')
+    
+    # Se houver múltiplas entradas numeradas [1], [2], etc., pegar apenas a primeira
+    if texto_str.count('[') > 1 and texto_str.count(']') > 1:
+        # Dividir por [ e pegar apenas a primeira parte significativa
+        partes = texto_str.split('[')
+        if len(partes) >= 2:
+            # Pegar a primeira entrada numerada completa
+            primeira_entrada = partes[1].split(']', 1)
+            if len(primeira_entrada) > 1:
+                texto_str = primeira_entrada[1].strip()
+            else:
+                # Se não tem ], pegar tudo até o próximo [
+                texto_str = primeira_entrada[0].strip()
+    
+    # Remover prefixos [1], [2] do início se existirem
+    texto_str = texto_str.strip()
+    while texto_str.startswith('[') and ']' in texto_str:
+        pos_fecha = texto_str.find(']')
+        if pos_fecha > 0 and pos_fecha < 5:  # Prefixo curto como [1], [2]
+            texto_str = texto_str[pos_fecha + 1:].strip()
+        else:
+            break
+    
+    # Limpar novamente espaços múltiplos
+    while '  ' in texto_str:
+        texto_str = texto_str.replace('  ', ' ')
+    
+    # Extrair apenas a parte mais importante (antes de ponto final ou vírgula se muito longo)
+    # Se o texto tiver mais de max_caracteres, tentar pegar apenas a primeira frase
+    if len(texto_str) > max_caracteres:
+        # Procurar primeiro ponto final, ponto e vírgula ou vírgula
+        for separador in ['. ', '; ', ', ']:
+            pos_sep = texto_str.find(separador)
+            if pos_sep > 0 and pos_sep <= max_caracteres:
+                texto_str = texto_str[:pos_sep + 1].strip()
+                break
+        
+        # Se ainda estiver muito longo, truncar de forma inteligente
+        if len(texto_str) > max_caracteres:
+            texto_truncado = texto_str[:max_caracteres - 3]
+            # Procurar último espaço antes do limite para não cortar palavras
+            ultimo_espaco = texto_truncado.rfind(' ')
+            if ultimo_espaco > max_caracteres * 0.6:  # Pelo menos 60% do texto
+                texto_str = texto_truncado[:ultimo_espaco].strip()
+            else:
+                texto_str = texto_truncado.strip()
+            
+            # Adicionar "..." apenas se realmente foi truncado
+            if len(texto_str) < len(texto):
+                texto_str = texto_str + '...'
+    
+    return texto_str
+
+
+def formatar_iccid_como_texto(iccid: any) -> str:
+    """
+    Formata ICCID como texto para preservar todos os dígitos no Excel
+    
+    Args:
+        iccid: Valor do ICCID (pode ser string, int, float)
+        
+    Returns:
+        ICCID formatado como string completa
+    """
+    if not iccid:
+        return ''
+    
+    # Converter para string preservando todos os caracteres
+    iccid_str = str(iccid).strip()
+    
+    # Remover espaços e caracteres especiais que possam causar problemas
+    iccid_str = ''.join(c for c in iccid_str if c.isdigit() or c.isalnum())
+    
+    # Garantir que seja tratado como texto no Excel (adicionar prefixo TAB)
+    # O Excel interpreta valores que começam com TAB como texto
+    # Mas como estamos usando CSV, vamos garantir que seja string completa
+    return iccid_str
+
+
 class CSVGenerator:
     """Gerador de planilhas CSV formatadas"""
     
@@ -302,11 +404,41 @@ class CSVGenerator:
                         # Se não encontrou, verificar data de entrega
                         if not is_entregue and hasattr(obj_match, 'data_entrega') and obj_match.data_entrega:
                             is_entregue = True
+                        
+                        # Se não encontrou, verificar ICCID (se possui ICCID, considera entregue)
+                        if not is_entregue:
+                            if hasattr(obj_match, 'iccid') and obj_match.iccid:
+                                iccid_str = str(obj_match.iccid).strip()
+                                if iccid_str and iccid_str.lower() != 'nan':
+                                    is_entregue = True
+                            elif hasattr(obj_match, 'chip_id') and obj_match.chip_id:
+                                chip_id_str = str(obj_match.chip_id).strip()
+                                if chip_id_str and chip_id_str.lower() != 'nan':
+                                    is_entregue = True
                 
                 # PRIORIDADE 2: Verificar na Base Analítica (se disponível e não encontrou ainda)
                 # Nota: Base Analítica será verificada no script de homologação se necessário
                 
-                # PRIORIDADE 3: Verificar status de logística do record (fallback)
+                # PRIORIDADE 3: Verificar ICCID na Base Analítica (se possui ICCID, considera entregue)
+                if not is_entregue and base_analitica_loader and hasattr(base_analitica_loader, 'is_loaded') and base_analitica_loader.is_loaded:
+                    import pandas as pd
+                    base_match = base_analitica_loader.find_by_codigo_externo(record.codigo_externo)
+                    if base_match is None and record.cpf:
+                        if hasattr(base_analitica_loader, 'find_by_cpf'):
+                            base_match = base_analitica_loader.find_by_cpf(record.cpf)
+                    
+                    if base_match is not None and isinstance(base_match, pd.Series):
+                        # Verificar ICCID na Base Analítica
+                        for col_name in ['ICCID', 'Chip ID', 'chip_id', 'Chip_ID', 'ICCID/Chip']:
+                            if col_name in base_match.index:
+                                iccid_val = base_match[col_name]
+                                if pd.notna(iccid_val):
+                                    iccid_str = str(iccid_val).strip()
+                                    if iccid_str and iccid_str.lower() != 'nan':
+                                        is_entregue = True
+                                        break
+                
+                # PRIORIDADE 4: Verificar status de logística do record (fallback)
                 if not is_entregue and record.status_logistica:
                     status_str = str(record.status_logistica).lower()
                     if any(termo in status_str for termo in ['pedido entregue', 'entregue', '6']):
@@ -418,11 +550,39 @@ class CSVGenerator:
                             )
                             if obj_match:
                                 # PRIORIDADE 1: Última Ocorrência (excluir "Entrega Cancelada")
+                                # Montar status completo com todos os detalhes disponíveis
+                                status_parts = []
+                                
+                                # Última Ocorrência (principal)
                                 if hasattr(obj_match, 'ultima_ocorrencia') and obj_match.ultima_ocorrencia:
                                     ultima_ocorrencia_str = str(obj_match.ultima_ocorrencia).lower()
                                     # Excluir entrega cancelada
                                     if 'entrega cancelada' not in ultima_ocorrencia_str and 'cancelada' not in ultima_ocorrencia_str:
-                                        status_entrega = safe_str(obj_match.ultima_ocorrencia)
+                                        status_parts.append(safe_str(obj_match.ultima_ocorrencia))
+                                
+                                # Se não encontrou na Última Ocorrência, tentar Última Ocorrência Cronológica
+                                if not status_parts and hasattr(obj_match, 'ultima_ocorrencia_cronologica') and obj_match.ultima_ocorrencia_cronologica:
+                                    ultima_ocorrencia_cron_str = str(obj_match.ultima_ocorrencia_cronologica).lower()
+                                    if 'entrega cancelada' not in ultima_ocorrencia_cron_str and 'cancelada' not in ultima_ocorrencia_cron_str:
+                                        status_parts.append(safe_str(obj_match.ultima_ocorrencia_cronologica))
+                                
+                                # Adicionar detalhes adicionais se disponíveis
+                                detalhes = []
+                                if hasattr(obj_match, 'local_ultima_ocorrencia') and obj_match.local_ultima_ocorrencia:
+                                    detalhes.append(f"Local: {safe_str(obj_match.local_ultima_ocorrencia)}")
+                                if hasattr(obj_match, 'cidade_ultima_ocorrencia') and obj_match.cidade_ultima_ocorrencia:
+                                    cidade = safe_str(obj_match.cidade_ultima_ocorrencia)
+                                    estado = safe_str(obj_match.estado_ultima_ocorrencia) if hasattr(obj_match, 'estado_ultima_ocorrencia') and obj_match.estado_ultima_ocorrencia else ''
+                                    if estado:
+                                        detalhes.append(f"{cidade}/{estado}")
+                                    else:
+                                        detalhes.append(cidade)
+                                
+                                # Montar status completo
+                                if status_parts:
+                                    status_entrega = status_parts[0]  # Status principal
+                                    if detalhes:
+                                        status_entrega += f" - {', '.join(detalhes)}"
                                 
                                 # Data da entrega
                                 if hasattr(obj_match, 'data_entrega') and obj_match.data_entrega:
@@ -431,24 +591,9 @@ class CSVGenerator:
                                 # ICCID ou chip_id (buscar no Relatório de Objetos)
                                 # Garantir que seja texto para preservar todos os dígitos
                                 if hasattr(obj_match, 'iccid') and obj_match.iccid:
-                                    iccid = safe_str(obj_match.iccid)
-                                    # Garantir que seja tratado como texto (adicionar prefixo se necessário)
-                                    if iccid and not iccid.startswith("'"):
-                                        # Se for numérico, converter para string preservando zeros à esquerda
-                                        try:
-                                            # Tentar converter para int e depois string para preservar formato
-                                            iccid_int = int(float(iccid))
-                                            iccid = str(iccid_int)
-                                        except (ValueError, OverflowError):
-                                            # Se não conseguir converter, manter como string
-                                            iccid = str(iccid)
+                                    iccid = formatar_iccid_como_texto(obj_match.iccid)
                                 elif hasattr(obj_match, 'chip_id') and obj_match.chip_id:
-                                    iccid = safe_str(obj_match.chip_id)
-                                    try:
-                                        iccid_int = int(float(iccid))
-                                        iccid = str(iccid_int)
-                                    except (ValueError, OverflowError):
-                                        iccid = str(iccid)
+                                    iccid = formatar_iccid_como_texto(obj_match.chip_id)
                                 
                                 # Parâmetro de identificação e data da última atualização
                                 # Usar data_insercao como data da última atualização da coleta
@@ -462,31 +607,80 @@ class CSVGenerator:
                                     parametro_identificacao = safe_str(record.codigo_externo)
                         
                         # PRIORIDADE 2: Bluechip Status da Base Analítica (se não encontrou Última Ocorrência)
+                        # FALLBACK: Usar id_isize (código externo) para buscar na Base Analítica
                         if not status_entrega and base_analitica_loader and hasattr(base_analitica_loader, 'is_loaded') and base_analitica_loader.is_loaded:
-                            import pandas as pd
+                            # Buscar por código externo (id_isize) primeiro
                             base_match = base_analitica_loader.find_by_codigo_externo(record.codigo_externo)
                             if base_match is None and record.cpf:
                                 if hasattr(base_analitica_loader, 'find_by_cpf'):
                                     base_match = base_analitica_loader.find_by_cpf(record.cpf)
                             
                             if base_match is not None and isinstance(base_match, pd.Series):
-                                # Buscar Bluechip Status
+                                # Buscar Bluechip Status (status principal)
+                                bluechip_status = None
                                 for col_name in ['Bluechip Status_Padronizado', 'Bluechip Status', 'Status Entrega', 'Status_Entrega']:
                                     if col_name in base_match.index:
-                                        bluechip_status = base_match[col_name]
-                                        if pd.notna(bluechip_status):
-                                            bluechip_status_str = str(bluechip_status).lower()
+                                        bluechip_status_val = base_match[col_name]
+                                        if pd.notna(bluechip_status_val):
+                                            bluechip_status_str = str(bluechip_status_val).lower()
                                             # Excluir entrega cancelada
                                             if 'entrega cancelada' not in bluechip_status_str and 'cancelada' not in bluechip_status_str:
-                                                status_entrega = safe_str(bluechip_status)
+                                                bluechip_status = safe_str(bluechip_status_val)
                                                 break
+                                
+                                # Se encontrou Bluechip Status, montar status completo com detalhes adicionais
+                                if bluechip_status:
+                                    status_parts_ba = [bluechip_status]
+                                    detalhes_ba = []
+                                    
+                                    # Buscar detalhes adicionais na Base Analítica
+                                    # Endereço/Local (se disponível)
+                                    for col_name in ['Endereco', 'Endereço', 'Logradouro', 'Rua', 'Local Entrega', 'Local_Entrega']:
+                                        if col_name in base_match.index:
+                                            local_val = base_match[col_name]
+                                            if pd.notna(local_val):
+                                                detalhes_ba.append(f"Local: {safe_str(local_val)}")
+                                                break
+                                    
+                                    # Cidade e Estado
+                                    cidade_ba = None
+                                    estado_ba = None
+                                    for col_name in ['Cidade', 'Municipio', 'Município']:
+                                        if col_name in base_match.index:
+                                            cidade_val = base_match[col_name]
+                                            if pd.notna(cidade_val):
+                                                cidade_ba = safe_str(cidade_val)
+                                                break
+                                    
+                                    for col_name in ['UF', 'Estado']:
+                                        if col_name in base_match.index:
+                                            estado_val = base_match[col_name]
+                                            if pd.notna(estado_val):
+                                                estado_ba = safe_str(estado_val)
+                                                break
+                                    
+                                    # Adicionar Cidade/Estado se disponível
+                                    if cidade_ba:
+                                        if estado_ba:
+                                            detalhes_ba.append(f"{cidade_ba}/{estado_ba}")
+                                        else:
+                                            detalhes_ba.append(cidade_ba)
+                                    
+                                    # Montar status completo da Base Analítica
+                                    status_entrega = status_parts_ba[0]
+                                    if detalhes_ba:
+                                        status_entrega += f" - {', '.join(detalhes_ba)}"
+                        
+                        # Garantir que ICCID seja tratado como texto no Excel
+                        # Adicionar prefixo ' para forçar Excel a tratar como texto
+                        iccid_formatado = f"'{iccid}" if iccid else ''
                         
                         row = [
                             safe_str(record.cpf),
                             safe_str(record.numero_acesso),
                             safe_str(record.numero_ordem),
                             safe_str(record.codigo_externo),
-                            iccid,  # Coluna E - ICCID ou chip_id
+                            iccid_formatado,  # Coluna E - ICCID ou chip_id (forçado como texto com prefixo ')
                             '',  # ToutBox (não temos no modelo)
                             safe_str(record.numero_bilhete),
                             safe_enum(record.status_bilhete),
@@ -498,10 +692,10 @@ class CSVGenerator:
                             safe_enum(record.status_ordem),
                             safe_str(record.preco_ordem),
                             safe_date(record.data_conclusao_ordem),
-                            safe_str(record.motivo_nao_consultado),
-                            safe_str(record.motivo_nao_cancelado),
-                            safe_str(record.motivo_nao_aberto),
-                            safe_str(record.motivo_nao_reagendado),
+                            sintetizar_texto(safe_str(record.motivo_nao_consultado), max_caracteres=80),
+                            sintetizar_texto(safe_str(record.motivo_nao_cancelado), max_caracteres=80),
+                            sintetizar_texto(safe_str(record.motivo_nao_aberto), max_caracteres=80),
+                            sintetizar_texto(safe_str(record.motivo_nao_reagendado), max_caracteres=80),
                             safe_str(record.novo_status_bilhete),
                             safe_date(record.nova_data_portabilidade),
                             safe_str(record.responsavel_processamento),

@@ -3,7 +3,6 @@ Script para gerar arquivo de homologação de Reabertura
 Filtra registros cancelados e agrupa por CPF
 """
 import sys
-import os
 from pathlib import Path
 from datetime import datetime
 
@@ -12,12 +11,10 @@ from src.utils.console_utils import setup_windows_console
 setup_windows_console()
 
 import logging
-import sqlite3
 import pandas as pd
 from src.database.db_manager import DatabaseManager
 from src.models.portabilidade import PortabilidadeStatus, StatusOrdem
 from src.utils.csv_generator import CSVGenerator
-from collections import defaultdict
 
 # Configurar logging
 Path('logs').mkdir(exist_ok=True)

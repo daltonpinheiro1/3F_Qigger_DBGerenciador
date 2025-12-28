@@ -38,6 +38,10 @@ class ObjectRecord:
     previsao_entrega: Optional[datetime] = None
     data_entrega: Optional[datetime] = None
     ultima_ocorrencia: Optional[str] = None  # Última Ocorrência do Relatório de Objetos
+    ultima_ocorrencia_cronologica: Optional[str] = None  # Última Ocorrência Cronológica
+    local_ultima_ocorrencia: Optional[str] = None  # Local Última Ocorrência
+    cidade_ultima_ocorrencia: Optional[str] = None  # Cidade Última Ocorrência
+    estado_ultima_ocorrencia: Optional[str] = None  # Estado Última Ocorrência
     iccid: Optional[str] = None  # ICCID ou chip_id
     
     def to_dict(self) -> dict:
@@ -211,7 +215,11 @@ class ObjectsLoader:
                 transportadora=self._clean_value(row.get('Transportadora')),
                 previsao_entrega=self._parse_date(row.get('Previsão Entrega')),
                 data_entrega=self._parse_date(row.get('Data Entrega')),
-                ultima_ocorrencia=self._clean_value(row.get('Última Ocorrência') or row.get('Ultima Ocorrencia') or row.get('Última Ocorrência')),
+                ultima_ocorrencia=self._clean_value(row.get('Última Ocorrencia') or row.get('Ultima Ocorrencia') or row.get('Última Ocorrência')),
+                ultima_ocorrencia_cronologica=self._clean_value(row.get('Última Ocorrencia Cronológica') or row.get('Ultima Ocorrencia Cronologica')),
+                local_ultima_ocorrencia=self._clean_value(row.get('Local Última Ocorrência') or row.get('Local Ultima Ocorrencia')),
+                cidade_ultima_ocorrencia=self._clean_value(row.get('Cidade Última Ocorrência') or row.get('Cidade Ultima Ocorrencia')),
+                estado_ultima_ocorrencia=self._clean_value(row.get('Estado Última Ocorrência') or row.get('Estado Ultima Ocorrencia')),
                 iccid=self._clean_value(row.get('ICCID') or row.get('Chip ID') or row.get('chip_id') or row.get('Chip_ID')),
             )
             

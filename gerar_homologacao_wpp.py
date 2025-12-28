@@ -3,7 +3,6 @@ Script para gerar arquivo de homologação WPP
 Mostra como os dados serão enviados ao WhatsApp sem fazer o envio real
 """
 import sys
-import os
 from pathlib import Path
 from datetime import datetime
 

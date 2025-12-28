@@ -3,7 +3,6 @@ Script para gerar arquivo de homologação de Aprovisionamentos
 Filtra registros em aprovisionamento E entregue (status 6 ou data_entrega)
 """
 import sys
-import os
 from pathlib import Path
 from datetime import datetime
 
@@ -12,14 +11,11 @@ from src.utils.console_utils import setup_windows_console
 setup_windows_console()
 
 import logging
-import sqlite3
 import pandas as pd
 from src.database.db_manager import DatabaseManager
 from src.utils.objects_loader import ObjectsLoader
 from src.models.portabilidade import PortabilidadeStatus, StatusOrdem
 from src.utils.csv_generator import CSVGenerator
-from collections import defaultdict
-import pandas as pd
 
 # Configurar logging
 Path('logs').mkdir(exist_ok=True)
@@ -220,9 +216,39 @@ def main():
                 # Se não encontrou, verificar data de entrega
                 if not is_entregue and hasattr(obj_match, 'data_entrega') and obj_match.data_entrega:
                     is_entregue = True
+                
+                # Se não encontrou, verificar ICCID (se possui ICCID, considera entregue)
+                if not is_entregue:
+                    if hasattr(obj_match, 'iccid') and obj_match.iccid:
+                        iccid_str = str(obj_match.iccid).strip()
+                        if iccid_str and iccid_str.lower() != 'nan':
+                            is_entregue = True
+                    elif hasattr(obj_match, 'chip_id') and obj_match.chip_id:
+                        chip_id_str = str(obj_match.chip_id).strip()
+                        if chip_id_str and chip_id_str.lower() != 'nan':
+                            is_entregue = True
         
         # PRIORIDADE 2: Verificar na Base Analítica (Bluechip Status) se não encontrou ainda
         # Nota: A Base Analítica será verificada no CSVGenerator se necessário
+        
+        # PRIORIDADE 3: Se ainda não encontrou, verificar ICCID na Base Analítica
+        if not is_entregue and base_analitica_loader and hasattr(base_analitica_loader, 'is_loaded') and base_analitica_loader.is_loaded:
+            import pandas as pd
+            base_match = base_analitica_loader.find_by_codigo_externo(record.codigo_externo)
+            if base_match is None and record.cpf:
+                if hasattr(base_analitica_loader, 'find_by_cpf'):
+                    base_match = base_analitica_loader.find_by_cpf(record.cpf)
+            
+            if base_match is not None and isinstance(base_match, pd.Series):
+                # Verificar ICCID na Base Analítica
+                for col_name in ['ICCID', 'Chip ID', 'chip_id', 'Chip_ID', 'ICCID/Chip']:
+                    if col_name in base_match.index:
+                        iccid_val = base_match[col_name]
+                        if pd.notna(iccid_val):
+                            iccid_str = str(iccid_val).strip()
+                            if iccid_str and iccid_str.lower() != 'nan':
+                                is_entregue = True
+                                break
         
         # Aplicar filtro: aprovisionamento E entregue
         if is_entregue:
