@@ -41,7 +41,6 @@ from src.utils.templates_wpp import TemplateMapper, TEMPLATES
 from src.utils.objects_loader import ObjectsLoader
 from src.models.portabilidade import PortabilidadeRecord
 from typing import Dict, Optional
-import sqlite3
 import pandas as pd
 
 # Caminhos

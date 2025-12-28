@@ -876,8 +876,6 @@ class CSVGenerator:
             # Gerar XLSX (Excel)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
-            import pandas as pd
-            
             # Preparar dados
             dados = []
             
