@@ -666,6 +666,7 @@ class DatabaseManager:
     def insert_record(self, record: PortabilidadeRecord) -> int:
         """
         Insere um novo registro de portabilidade
+        Usa estratégia de UPDATE/INSERT para evitar problemas com foreign keys
         
         Args:
             record: Registro de portabilidade a ser inserido
@@ -681,41 +682,101 @@ class DatabaseManager:
             data = record.to_dict()
             
             try:
+                # Primeiro, verificar se o registro já existe
                 cursor.execute("""
-                    INSERT OR REPLACE INTO portabilidade_records (
-                        cpf, numero_acesso, numero_ordem, codigo_externo,
-                        numero_temporario, bilhete_temporario, numero_bilhete,
-                        status_bilhete, operadora_doadora, data_portabilidade,
-                        motivo_recusa, motivo_cancelamento, ultimo_bilhete,
-                        status_ordem, preco_ordem, data_conclusao_ordem,
-                        motivo_nao_consultado, responsavel_processamento,
-                        data_inicial_processamento, data_final_processamento,
-                        registro_valido, regra_id, o_que_aconteceu,
-                        acao_a_realizar, tipo_mensagem, template, mapeado,
-                        novo_status_bilhete_trigger, ajustes_numero_acesso_trigger
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    data['cpf'], data['numero_acesso'], data['numero_ordem'],
-                    data['codigo_externo'], data['numero_temporario'],
-                    data['bilhete_temporario'], data['numero_bilhete'],
-                    data['status_bilhete'], data['operadora_doadora'],
-                    data['data_portabilidade'], data['motivo_recusa'],
-                    data['motivo_cancelamento'], data['ultimo_bilhete'],
-                    data['status_ordem'], data['preco_ordem'],
-                    data['data_conclusao_ordem'], data['motivo_nao_consultado'],
-                    data['responsavel_processamento'],
-                    data['data_inicial_processamento'], data['data_final_processamento'],
-                    data['registro_valido'], data['regra_id'], data['o_que_aconteceu'],
-                    data['acao_a_realizar'], data['tipo_mensagem'], data['template'],
-                    data['mapeado'], data['novo_status_bilhete_trigger'],
-                    data['ajustes_numero_acesso_trigger']
-                ))
+                    SELECT id FROM portabilidade_records
+                    WHERE cpf = ? AND numero_acesso = ? AND numero_ordem = ?
+                """, (record.cpf, record.numero_acesso, record.numero_ordem))
+                existing = cursor.fetchone()
                 
-                record_id = cursor.lastrowid
-                logger.debug(f"Registro inserido com ID: {record_id} (CPF: {record.cpf}, Ordem: {record.numero_ordem})")
+                if existing:
+                    # Atualizar registro existente
+                    record_id = existing[0]
+                    cursor.execute("""
+                        UPDATE portabilidade_records SET
+                            codigo_externo = ?,
+                            numero_temporario = ?,
+                            bilhete_temporario = ?,
+                            numero_bilhete = ?,
+                            status_bilhete = ?,
+                            operadora_doadora = ?,
+                            data_portabilidade = ?,
+                            motivo_recusa = ?,
+                            motivo_cancelamento = ?,
+                            ultimo_bilhete = ?,
+                            status_ordem = ?,
+                            preco_ordem = ?,
+                            data_conclusao_ordem = ?,
+                            motivo_nao_consultado = ?,
+                            responsavel_processamento = ?,
+                            data_inicial_processamento = ?,
+                            data_final_processamento = ?,
+                            registro_valido = ?,
+                            regra_id = ?,
+                            o_que_aconteceu = ?,
+                            acao_a_realizar = ?,
+                            tipo_mensagem = ?,
+                            template = ?,
+                            mapeado = ?,
+                            novo_status_bilhete_trigger = ?,
+                            ajustes_numero_acesso_trigger = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    """, (
+                        data['codigo_externo'], data['numero_temporario'],
+                        data['bilhete_temporario'], data['numero_bilhete'],
+                        data['status_bilhete'], data['operadora_doadora'],
+                        data['data_portabilidade'], data['motivo_recusa'],
+                        data['motivo_cancelamento'], data['ultimo_bilhete'],
+                        data['status_ordem'], data['preco_ordem'],
+                        data['data_conclusao_ordem'], data['motivo_nao_consultado'],
+                        data['responsavel_processamento'],
+                        data['data_inicial_processamento'], data['data_final_processamento'],
+                        data['registro_valido'], data['regra_id'], data['o_que_aconteceu'],
+                        data['acao_a_realizar'], data['tipo_mensagem'], data['template'],
+                        data['mapeado'], data['novo_status_bilhete_trigger'],
+                        data['ajustes_numero_acesso_trigger'],
+                        record_id
+                    ))
+                    logger.debug(f"Registro atualizado com ID: {record_id} (CPF: {record.cpf}, Ordem: {record.numero_ordem})")
+                else:
+                    # Inserir novo registro
+                    cursor.execute("""
+                        INSERT INTO portabilidade_records (
+                            cpf, numero_acesso, numero_ordem, codigo_externo,
+                            numero_temporario, bilhete_temporario, numero_bilhete,
+                            status_bilhete, operadora_doadora, data_portabilidade,
+                            motivo_recusa, motivo_cancelamento, ultimo_bilhete,
+                            status_ordem, preco_ordem, data_conclusao_ordem,
+                            motivo_nao_consultado, responsavel_processamento,
+                            data_inicial_processamento, data_final_processamento,
+                            registro_valido, regra_id, o_que_aconteceu,
+                            acao_a_realizar, tipo_mensagem, template, mapeado,
+                            novo_status_bilhete_trigger, ajustes_numero_acesso_trigger
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        data['cpf'], data['numero_acesso'], data['numero_ordem'],
+                        data['codigo_externo'], data['numero_temporario'],
+                        data['bilhete_temporario'], data['numero_bilhete'],
+                        data['status_bilhete'], data['operadora_doadora'],
+                        data['data_portabilidade'], data['motivo_recusa'],
+                        data['motivo_cancelamento'], data['ultimo_bilhete'],
+                        data['status_ordem'], data['preco_ordem'],
+                        data['data_conclusao_ordem'], data['motivo_nao_consultado'],
+                        data['responsavel_processamento'],
+                        data['data_inicial_processamento'], data['data_final_processamento'],
+                        data['registro_valido'], data['regra_id'], data['o_que_aconteceu'],
+                        data['acao_a_realizar'], data['tipo_mensagem'], data['template'],
+                        data['mapeado'], data['novo_status_bilhete_trigger'],
+                        data['ajustes_numero_acesso_trigger']
+                    ))
+                    record_id = cursor.lastrowid
+                    logger.debug(f"Registro inserido com ID: {record_id} (CPF: {record.cpf}, Ordem: {record.numero_ordem})")
+                
                 return record_id
             except sqlite3.IntegrityError as e:
                 logger.warning(f"Violação de integridade ao inserir registro (CPF: {record.cpf}, Ordem: {record.numero_ordem}): {e}")
+                # Tentar buscar novamente
                 cursor.execute("""
                     SELECT id FROM portabilidade_records
                     WHERE cpf = ? AND numero_acesso = ? AND numero_ordem = ?
@@ -728,6 +789,7 @@ class DatabaseManager:
     def insert_records_batch(self, records: List[PortabilidadeRecord]) -> List[int]:
         """
         Insere múltiplos registros em lote (otimização de performance)
+        Usa estratégia de UPDATE/INSERT para evitar problemas com foreign keys
         
         Args:
             records: Lista de registros de portabilidade
@@ -741,47 +803,119 @@ class DatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
-            # Preparar dados em lote
-            batch_data = []
+            record_ids = []
+            
+            # Processar em lote: primeiro buscar IDs existentes
+            existing_keys = {}
+            for record in records:
+                key = (record.cpf, record.numero_acesso, record.numero_ordem)
+                cursor.execute("""
+                    SELECT id FROM portabilidade_records
+                    WHERE cpf = ? AND numero_acesso = ? AND numero_ordem = ?
+                """, key)
+                row = cursor.fetchone()
+                if row:
+                    existing_keys[key] = row[0]
+            
+            # Separar em inserções e atualizações
+            inserts = []
+            updates = []
+            
             for record in records:
                 data = record.to_dict()
-                batch_data.append((
-                    data['cpf'], data['numero_acesso'], data['numero_ordem'],
-                    data['codigo_externo'], data['numero_temporario'],
-                    data['bilhete_temporario'], data['numero_bilhete'],
-                    data['status_bilhete'], data['operadora_doadora'],
-                    data['data_portabilidade'], data['motivo_recusa'],
-                    data['motivo_cancelamento'], data['ultimo_bilhete'],
-                    data['status_ordem'], data['preco_ordem'],
-                    data['data_conclusao_ordem'], data['motivo_nao_consultado'],
-                    data['responsavel_processamento'],
-                    data['data_inicial_processamento'], data['data_final_processamento'],
-                    data['registro_valido'], data['regra_id'], data['o_que_aconteceu'],
-                    data['acao_a_realizar'], data['tipo_mensagem'], data['template'],
-                    data['mapeado'], data['novo_status_bilhete_trigger'],
-                    data['ajustes_numero_acesso_trigger']
-                ))
+                key = (record.cpf, record.numero_acesso, record.numero_ordem)
+                
+                if key in existing_keys:
+                    # Preparar para atualização
+                    updates.append((
+                        data['codigo_externo'], data['numero_temporario'],
+                        data['bilhete_temporario'], data['numero_bilhete'],
+                        data['status_bilhete'], data['operadora_doadora'],
+                        data['data_portabilidade'], data['motivo_recusa'],
+                        data['motivo_cancelamento'], data['ultimo_bilhete'],
+                        data['status_ordem'], data['preco_ordem'],
+                        data['data_conclusao_ordem'], data['motivo_nao_consultado'],
+                        data['responsavel_processamento'],
+                        data['data_inicial_processamento'], data['data_final_processamento'],
+                        data['registro_valido'], data['regra_id'], data['o_que_aconteceu'],
+                        data['acao_a_realizar'], data['tipo_mensagem'], data['template'],
+                        data['mapeado'], data['novo_status_bilhete_trigger'],
+                        data['ajustes_numero_acesso_trigger'],
+                        existing_keys[key]
+                    ))
+                else:
+                    # Preparar para inserção
+                    inserts.append((
+                        data['cpf'], data['numero_acesso'], data['numero_ordem'],
+                        data['codigo_externo'], data['numero_temporario'],
+                        data['bilhete_temporario'], data['numero_bilhete'],
+                        data['status_bilhete'], data['operadora_doadora'],
+                        data['data_portabilidade'], data['motivo_recusa'],
+                        data['motivo_cancelamento'], data['ultimo_bilhete'],
+                        data['status_ordem'], data['preco_ordem'],
+                        data['data_conclusao_ordem'], data['motivo_nao_consultado'],
+                        data['responsavel_processamento'],
+                        data['data_inicial_processamento'], data['data_final_processamento'],
+                        data['registro_valido'], data['regra_id'], data['o_que_aconteceu'],
+                        data['acao_a_realizar'], data['tipo_mensagem'], data['template'],
+                        data['mapeado'], data['novo_status_bilhete_trigger'],
+                        data['ajustes_numero_acesso_trigger']
+                    ))
             
-            # Executar inserção em lote
-            cursor.executemany("""
-                INSERT OR REPLACE INTO portabilidade_records (
-                    cpf, numero_acesso, numero_ordem, codigo_externo,
-                    numero_temporario, bilhete_temporario, numero_bilhete,
-                    status_bilhete, operadora_doadora, data_portabilidade,
-                    motivo_recusa, motivo_cancelamento, ultimo_bilhete,
-                    status_ordem, preco_ordem, data_conclusao_ordem,
-                    motivo_nao_consultado, responsavel_processamento,
-                    data_inicial_processamento, data_final_processamento,
-                    registro_valido, regra_id, o_que_aconteceu,
-                    acao_a_realizar, tipo_mensagem, template, mapeado,
-                    novo_status_bilhete_trigger, ajustes_numero_acesso_trigger
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, batch_data)
+            # Executar atualizações
+            if updates:
+                cursor.executemany("""
+                    UPDATE portabilidade_records SET
+                        codigo_externo = ?,
+                        numero_temporario = ?,
+                        bilhete_temporario = ?,
+                        numero_bilhete = ?,
+                        status_bilhete = ?,
+                        operadora_doadora = ?,
+                        data_portabilidade = ?,
+                        motivo_recusa = ?,
+                        motivo_cancelamento = ?,
+                        ultimo_bilhete = ?,
+                        status_ordem = ?,
+                        preco_ordem = ?,
+                        data_conclusao_ordem = ?,
+                        motivo_nao_consultado = ?,
+                        responsavel_processamento = ?,
+                        data_inicial_processamento = ?,
+                        data_final_processamento = ?,
+                        registro_valido = ?,
+                        regra_id = ?,
+                        o_que_aconteceu = ?,
+                        acao_a_realizar = ?,
+                        tipo_mensagem = ?,
+                        template = ?,
+                        mapeado = ?,
+                        novo_status_bilhete_trigger = ?,
+                        ajustes_numero_acesso_trigger = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, updates)
+            
+            # Executar inserções
+            if inserts:
+                cursor.executemany("""
+                    INSERT INTO portabilidade_records (
+                        cpf, numero_acesso, numero_ordem, codigo_externo,
+                        numero_temporario, bilhete_temporario, numero_bilhete,
+                        status_bilhete, operadora_doadora, data_portabilidade,
+                        motivo_recusa, motivo_cancelamento, ultimo_bilhete,
+                        status_ordem, preco_ordem, data_conclusao_ordem,
+                        motivo_nao_consultado, responsavel_processamento,
+                        data_inicial_processamento, data_final_processamento,
+                        registro_valido, regra_id, o_que_aconteceu,
+                        acao_a_realizar, tipo_mensagem, template, mapeado,
+                        novo_status_bilhete_trigger, ajustes_numero_acesso_trigger
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, inserts)
             
             conn.commit()
             
-            # Buscar IDs inseridos
-            record_ids = []
+            # Buscar IDs finais
             for record in records:
                 cursor.execute("""
                     SELECT id FROM portabilidade_records
@@ -791,7 +925,7 @@ class DatabaseManager:
                 if row:
                     record_ids.append(row[0])
             
-            logger.debug(f"Inseridos {len(records)} registros em lote")
+            logger.debug(f"Processados {len(records)} registros em lote: {len(inserts)} inseridos, {len(updates)} atualizados")
             return record_ids
     
     def get_record(self, cpf: str, numero_acesso: str, numero_ordem: str) -> Optional[Dict[str, Any]]:
