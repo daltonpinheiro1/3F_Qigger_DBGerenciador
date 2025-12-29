@@ -85,7 +85,7 @@ def processar_arquivos():
     print("[2] Sincronizando templates WPP...")
     db_manager.sync_templates_from_config()
     
-    # 2. Carregar Relatório de Objetos
+    # 2. Carregar e sincronizar Relatório de Objetos
     objects_loader = None
     
     if arquivo_objetos:
@@ -93,8 +93,14 @@ def processar_arquivos():
         try:
             objects_loader = ObjectsLoader(str(arquivo_objetos))
             print(f"    >> {objects_loader.total_records} registros carregados")
+            
+            # Sincronizar com o banco de dados
+            print("[3.1] Sincronizando Relatório de Objetos com banco de dados...")
+            stats = db_manager.sync_relatorio_objetos(objects_loader)
+            print(f"    >> {stats['inseridos']} inseridos, {stats['atualizados']} atualizados, {stats['erros']} erros")
         except Exception as e:
             print(f"    >> ERRO ao carregar: {e}")
+            logger.error(f"Erro ao carregar Relatório de Objetos: {e}", exc_info=True)
             arquivo_objetos = None
     else:
         print("[3] Relatório de Objetos não encontrado")
@@ -218,34 +224,41 @@ def processar_arquivos():
     print(f"  Com dados de logística: {sum(1 for r, _ in results_list if r.nome_cliente)}")
     print(f"  Com link de rastreio: {sum(1 for r, _ in results_list if r.cod_rastreio)}")
     
-    # 9. Excluir arquivos processados
+    # 9. Excluir arquivos processados (após processamento bem-sucedido)
     print()
     print("-" * 70)
     print("LIMPEZA DE ARQUIVOS PROCESSADOS")
     print("-" * 70)
     
     arquivos_excluidos = []
+    processamento_sucesso = len(results_list) > 0 and sum(1 for r, _ in results_list if r.mapeado) > 0
     
-    try:
-        if arquivo_csv and arquivo_csv.exists():
-            arquivo_csv.unlink()
-            arquivos_excluidos.append(arquivo_csv.name)
-            print(f"  >> Deletado: {arquivo_csv.name}")
-    except Exception as e:
-        print(f"  >> Erro ao deletar CSV: {e}")
-        logger.warning(f"Erro ao deletar CSV {arquivo_csv}: {e}")
-    
-    try:
-        if arquivo_objetos and arquivo_objetos.exists():
-            arquivo_objetos.unlink()
-            arquivos_excluidos.append(arquivo_objetos.name)
-            print(f"  >> Deletado: {arquivo_objetos.name}")
-    except Exception as e:
-        print(f"  >> Erro ao deletar XLSX: {e}")
-        logger.warning(f"Erro ao deletar XLSX {arquivo_objetos}: {e}")
-    
-    if not arquivos_excluidos:
-        print("  >> Nenhum arquivo excluído")
+    if processamento_sucesso:
+        try:
+            if arquivo_csv and arquivo_csv.exists():
+                arquivo_csv.unlink()
+                arquivos_excluidos.append(arquivo_csv.name)
+                print(f"  >> Deletado: {arquivo_csv.name}")
+                logger.info(f"Arquivo CSV deletado após processamento: {arquivo_csv.name}")
+        except Exception as e:
+            print(f"  >> Erro ao deletar CSV: {e}")
+            logger.warning(f"Erro ao deletar CSV {arquivo_csv}: {e}")
+        
+        try:
+            if arquivo_objetos and arquivo_objetos.exists():
+                arquivo_objetos.unlink()
+                arquivos_excluidos.append(arquivo_objetos.name)
+                print(f"  >> Deletado: {arquivo_objetos.name}")
+                logger.info(f"Arquivo Relatório de Objetos deletado após sincronização: {arquivo_objetos.name}")
+        except Exception as e:
+            print(f"  >> Erro ao deletar XLSX: {e}")
+            logger.warning(f"Erro ao deletar XLSX {arquivo_objetos}: {e}")
+        
+        if not arquivos_excluidos:
+            print("  >> Nenhum arquivo excluído")
+    else:
+        print("  >> Processamento não foi bem-sucedido. Arquivos mantidos para reprocessamento.")
+        logger.warning("Processamento não foi bem-sucedido. Arquivos não foram deletados.")
     
     print()
     print("=" * 70)

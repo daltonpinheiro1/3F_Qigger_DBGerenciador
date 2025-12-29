@@ -83,14 +83,20 @@ def processar_arquivos_importacao():
     for arquivo in arquivos_csv:
         logger.info(f"  - {arquivo.name}")
     
-    # Carregar Relatório de Objetos (logística) se existir
+    # Carregar e sincronizar Relatório de Objetos (logística) se existir
     objects_loader = None
+    arquivo_objetos = None
     if arquivos_objetos:
         # Usar o mais recente
         arquivo_objetos = max(arquivos_objetos, key=lambda x: x.stat().st_mtime)
         logger.info(f"\nRelatório de Objetos encontrado: {arquivo_objetos.name}")
         objects_loader = ObjectsLoader(str(arquivo_objetos))
         logger.info(f"  Registros de logística carregados: {objects_loader.total_records}")
+        
+        # Sincronizar com o banco de dados
+        logger.info("  Sincronizando Relatório de Objetos com banco de dados...")
+        stats = db_manager.sync_relatorio_objetos(objects_loader)
+        logger.info(f"  >> {stats['inseridos']} inseridos, {stats['atualizados']} atualizados, {stats['erros']} erros")
     else:
         logger.warning("\nNenhum Relatório de Objetos encontrado. Dados de logística não serão enriquecidos.")
     
@@ -222,12 +228,29 @@ def processar_arquivos_importacao():
             else:
                 logger.warning("⚠ Nenhum arquivo de retorno foi gerado.")
             
-            # Excluir arquivo fonte após processamento bem-sucedido
-            try:
-                arquivo_csv.unlink()
-                logger.info(f"✓ Arquivo fonte excluído após processamento: {arquivo_csv.name}")
-            except Exception as e:
-                logger.warning(f"⚠ Não foi possível excluir arquivo {arquivo_csv.name}: {e}")
+            # Excluir arquivos após processamento bem-sucedido
+            arquivos_excluidos = []
+            
+            # Deletar CSV se processamento foi bem-sucedido
+            if success and registros_processados > 0:
+                try:
+                    arquivo_csv.unlink()
+                    arquivos_excluidos.append(arquivo_csv.name)
+                    logger.info(f"✓ Arquivo CSV excluído após processamento: {arquivo_csv.name}")
+                except Exception as e:
+                    logger.warning(f"⚠ Não foi possível excluir arquivo CSV {arquivo_csv.name}: {e}")
+            
+            # Deletar Relatório de Objetos após sincronização (apenas uma vez, no último arquivo)
+            if arquivo_objetos and arquivo_objetos.exists() and idx == total_arquivos:
+                try:
+                    arquivo_objetos.unlink()
+                    arquivos_excluidos.append(arquivo_objetos.name)
+                    logger.info(f"✓ Relatório de Objetos excluído após sincronização: {arquivo_objetos.name}")
+                except Exception as e:
+                    logger.warning(f"⚠ Não foi possível excluir Relatório de Objetos {arquivo_objetos.name}: {e}")
+            
+            if not arquivos_excluidos and success:
+                logger.info("✓ Processamento concluído. Arquivos mantidos para verificação.")
             
             # Informar caminhos importantes
             db_abs_path = str(Path(db_path).absolute())

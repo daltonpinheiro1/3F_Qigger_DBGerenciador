@@ -13,7 +13,7 @@ from src.models.portabilidade import PortabilidadeRecord, TriggerRule
 logger = logging.getLogger(__name__)
 
 # Versão do schema do banco de dados
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 class DatabaseManager:
@@ -48,17 +48,21 @@ class DatabaseManager:
             # Sincronização normal (seguro mas mais rápido que FULL)
             cursor.execute("PRAGMA synchronous = NORMAL")
             
-            # Cache de 64MB para queries
-            cursor.execute("PRAGMA cache_size = -64000")
+            # Cache de 128MB para queries (aumentado para melhor performance)
+            cursor.execute("PRAGMA cache_size = -128000")
             
             # Armazenar tabelas temporárias em memória
             cursor.execute("PRAGMA temp_store = MEMORY")
             
-            # Habilitar mmap para leitura mais rápida
-            cursor.execute("PRAGMA mmap_size = 268435456")  # 256MB
+            # Habilitar mmap para leitura mais rápida (512MB)
+            cursor.execute("PRAGMA mmap_size = 536870912")
             
             # Auto vacuum incremental
             cursor.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            
+            # Otimizações adicionais
+            cursor.execute("PRAGMA optimize")  # Análise automática de queries
+            cursor.execute("PRAGMA foreign_keys = ON")  # Garantir integridade referencial
             
             conn.commit()
             logger.debug("Otimizações de performance aplicadas")
@@ -222,6 +226,40 @@ class DatabaseManager:
                 )
             """)
             
+            # Tabela de Relatório de Objetos (logística unificada com versionamento)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS relatorio_objetos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    registro_id_base TEXT NOT NULL,  -- ID único do registro (nu_pedido + codigo_externo)
+                    versao INTEGER NOT NULL DEFAULT 1,  -- Versão do registro
+                    nu_pedido TEXT NOT NULL,
+                    codigo_externo TEXT NOT NULL,
+                    id_erp TEXT,
+                    rastreio TEXT,
+                    destinatario TEXT,
+                    documento TEXT,
+                    telefone TEXT,
+                    cidade TEXT,
+                    uf TEXT,
+                    cep TEXT,
+                    data_criacao_pedido TEXT,
+                    data_insercao TEXT,
+                    status TEXT,
+                    transportadora TEXT,
+                    previsao_entrega TEXT,
+                    data_entrega TEXT,
+                    ultima_ocorrencia TEXT,
+                    ultima_ocorrencia_cronologica TEXT,
+                    local_ultima_ocorrencia TEXT,
+                    cidade_ultima_ocorrencia TEXT,
+                    estado_ultima_ocorrencia TEXT,
+                    iccid TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(registro_id_base, versao)
+                )
+            """)
+            
             conn.commit()
             logger.info("Banco de dados inicializado com sucesso")
     
@@ -279,6 +317,23 @@ class DatabaseManager:
         except Exception as e:
             logger.debug(f"Alguns índices não puderam ser criados (normal em migração): {e}")
         
+        # Índices para relatorio_objetos (se tabela existe)
+        try:
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_objetos_codigo_externo 
+                ON relatorio_objetos(codigo_externo)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_objetos_id_erp 
+                ON relatorio_objetos(id_erp)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_objetos_documento 
+                ON relatorio_objetos(documento)
+            """)
+        except Exception as e:
+            logger.debug(f"Índices de relatorio_objetos não criados (tabela pode não existir ainda): {e}")
+        
         # Índice composto para matching de regras
         try:
             cursor.execute("""
@@ -314,6 +369,12 @@ class DatabaseManager:
         if from_version < 3:
             # Migração para v3: corrigir tabela rules_log e adicionar templates
             self._migrate_to_v3(cursor)
+        if from_version < 4:
+            # Migração para v4: adicionar tabela relatorio_objetos
+            self._migrate_to_v4(cursor)
+        if from_version < 5:
+            # Migração para v5: adicionar versionamento ao relatorio_objetos
+            self._migrate_to_v5(cursor)
     
     def _migrate_to_v2(self, cursor):
         """Migração para versão 2 - adiciona novos campos"""
@@ -408,6 +469,167 @@ class DatabaseManager:
         """)
         
         logger.info("Migração v3 concluída - rules_log corrigida e tabelas de templates criadas")
+    
+    def _migrate_to_v4(self, cursor):
+        """Migração para versão 4 - adiciona tabela relatorio_objetos para unificação"""
+        # Criar tabela de Relatório de Objetos
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS relatorio_objetos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nu_pedido TEXT NOT NULL,
+                codigo_externo TEXT NOT NULL,
+                id_erp TEXT,
+                rastreio TEXT,
+                destinatario TEXT,
+                documento TEXT,
+                telefone TEXT,
+                cidade TEXT,
+                uf TEXT,
+                cep TEXT,
+                data_criacao_pedido TEXT,
+                data_insercao TEXT,
+                status TEXT,
+                transportadora TEXT,
+                previsao_entrega TEXT,
+                data_entrega TEXT,
+                ultima_ocorrencia TEXT,
+                ultima_ocorrencia_cronologica TEXT,
+                local_ultima_ocorrencia TEXT,
+                cidade_ultima_ocorrencia TEXT,
+                estado_ultima_ocorrencia TEXT,
+                iccid TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(nu_pedido, codigo_externo)
+            )
+        """)
+        
+        # Criar índices para busca otimizada
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_objetos_codigo_externo 
+            ON relatorio_objetos(codigo_externo)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_objetos_id_erp 
+            ON relatorio_objetos(id_erp)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_objetos_documento 
+            ON relatorio_objetos(documento)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_objetos_nu_pedido 
+            ON relatorio_objetos(nu_pedido)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_objetos_data_insercao 
+            ON relatorio_objetos(data_insercao DESC)
+        """)
+        
+        logger.info("Migração v4 concluída - tabela relatorio_objetos criada")
+    
+    def _migrate_to_v5(self, cursor):
+        """Migração para versão 5 - adiciona versionamento ao relatorio_objetos"""
+        # Verificar se tabela existe
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='relatorio_objetos'
+        """)
+        if not cursor.fetchone():
+            # Tabela não existe, será criada na inicialização
+            logger.info("Tabela relatorio_objetos não existe, será criada na inicialização")
+            return
+        
+        # Verificar se coluna registro_id_base já existe
+        cursor.execute("PRAGMA table_info(relatorio_objetos)")
+        existing_columns = {col[1] for col in cursor.fetchall()}
+        
+        if 'registro_id_base' not in existing_columns:
+            # Adicionar colunas de versionamento
+            try:
+                cursor.execute("ALTER TABLE relatorio_objetos ADD COLUMN registro_id_base TEXT")
+                cursor.execute("ALTER TABLE relatorio_objetos ADD COLUMN versao INTEGER DEFAULT 1")
+                
+                # Preencher registro_id_base para registros existentes
+                cursor.execute("""
+                    UPDATE relatorio_objetos 
+                    SET registro_id_base = nu_pedido || '|' || codigo_externo
+                    WHERE registro_id_base IS NULL
+                """)
+                
+                # Remover constraint UNIQUE antiga e criar nova com versionamento
+                # SQLite não suporta DROP CONSTRAINT, então precisamos recriar a tabela
+                logger.info("Migrando dados para estrutura com versionamento...")
+                
+                # Criar tabela temporária
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS relatorio_objetos_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        registro_id_base TEXT NOT NULL,
+                        versao INTEGER NOT NULL DEFAULT 1,
+                        nu_pedido TEXT NOT NULL,
+                        codigo_externo TEXT NOT NULL,
+                        id_erp TEXT,
+                        rastreio TEXT,
+                        destinatario TEXT,
+                        documento TEXT,
+                        telefone TEXT,
+                        cidade TEXT,
+                        uf TEXT,
+                        cep TEXT,
+                        data_criacao_pedido TEXT,
+                        data_insercao TEXT,
+                        status TEXT,
+                        transportadora TEXT,
+                        previsao_entrega TEXT,
+                        data_entrega TEXT,
+                        ultima_ocorrencia TEXT,
+                        ultima_ocorrencia_cronologica TEXT,
+                        local_ultima_ocorrencia TEXT,
+                        cidade_ultima_ocorrencia TEXT,
+                        estado_ultima_ocorrencia TEXT,
+                        iccid TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(registro_id_base, versao)
+                    )
+                """)
+                
+                # Copiar dados existentes (cada registro vira versão 1)
+                cursor.execute("""
+                    INSERT INTO relatorio_objetos_new (
+                        registro_id_base, versao, nu_pedido, codigo_externo, id_erp, rastreio,
+                        destinatario, documento, telefone, cidade, uf, cep,
+                        data_criacao_pedido, data_insercao, status, transportadora,
+                        previsao_entrega, data_entrega, ultima_ocorrencia,
+                        ultima_ocorrencia_cronologica, local_ultima_ocorrencia,
+                        cidade_ultima_ocorrencia, estado_ultima_ocorrencia, iccid,
+                        created_at, updated_at
+                    )
+                    SELECT 
+                        nu_pedido || '|' || codigo_externo as registro_id_base,
+                        1 as versao,
+                        nu_pedido, codigo_externo, id_erp, rastreio,
+                        destinatario, documento, telefone, cidade, uf, cep,
+                        data_criacao_pedido, data_insercao, status, transportadora,
+                        previsao_entrega, data_entrega, ultima_ocorrencia,
+                        ultima_ocorrencia_cronologica, local_ultima_ocorrencia,
+                        cidade_ultima_ocorrencia, estado_ultima_ocorrencia, iccid,
+                        created_at, updated_at
+                    FROM relatorio_objetos
+                """)
+                
+                # Remover tabela antiga e renomear nova
+                cursor.execute("DROP TABLE relatorio_objetos")
+                cursor.execute("ALTER TABLE relatorio_objetos_new RENAME TO relatorio_objetos")
+                
+                logger.info("Migração v5 concluída - versionamento adicionado ao relatorio_objetos")
+                
+            except Exception as e:
+                logger.error(f"Erro na migração v5: {e}")
+                raise
+        else:
+            logger.info("Migração v5 já aplicada - versionamento já existe")
     
     @contextmanager
     def _get_connection(self):
@@ -860,6 +1082,170 @@ class DatabaseManager:
         self.analyze()
         logger.info("Otimização completa do banco de dados realizada")
     
+    def get_database_size(self) -> Dict[str, Any]:
+        """
+        Retorna informações sobre o tamanho do banco de dados
+        
+        Returns:
+            Dicionário com informações de tamanho
+        """
+        import os
+        db_path = Path(self.db_path)
+        
+        size_info = {
+            'file_size_mb': 0,
+            'file_exists': False,
+            'tables': {},
+            'total_rows': 0
+        }
+        
+        if db_path.exists():
+            size_info['file_size_mb'] = round(db_path.stat().st_size / (1024 * 1024), 2)
+            size_info['file_exists'] = True
+            
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Tamanho por tabela
+                cursor.execute("""
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                """)
+                tables = [row[0] for row in cursor.fetchall()]
+                
+                for table in tables:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cursor.fetchone()[0]
+                    size_info['tables'][table] = count
+                    size_info['total_rows'] += count
+        
+        return size_info
+    
+    def cleanup_old_versions(self, days_to_keep: int = 90, keep_min_versions: int = 5) -> Dict[str, int]:
+        """
+        Remove versões antigas do relatorio_objetos mantendo apenas as mais recentes
+        
+        Args:
+            days_to_keep: Número de dias para manter versões
+            keep_min_versions: Número mínimo de versões a manter por registro
+            
+        Returns:
+            Estatísticas da limpeza
+        """
+        stats = {'removidos': 0, 'registros_afetados': 0}
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Buscar registros com versões antigas
+            cursor.execute("""
+                SELECT registro_id_base, COUNT(*) as total_versoes
+                FROM relatorio_objetos
+                WHERE updated_at < datetime('now', '-' || ? || ' days')
+                GROUP BY registro_id_base
+                HAVING COUNT(*) > ?
+            """, (days_to_keep, keep_min_versions))
+            
+            registros_para_limpar = cursor.fetchall()
+            
+            for registro_id_base, total_versoes in registros_para_limpar:
+                # Manter apenas as N versões mais recentes
+                cursor.execute("""
+                    DELETE FROM relatorio_objetos
+                    WHERE registro_id_base = ?
+                    AND id NOT IN (
+                        SELECT id FROM relatorio_objetos
+                        WHERE registro_id_base = ?
+                        ORDER BY versao DESC, updated_at DESC
+                        LIMIT ?
+                    )
+                """, (registro_id_base, registro_id_base, keep_min_versions))
+                
+                removidos = cursor.rowcount
+                stats['removidos'] += removidos
+                if removidos > 0:
+                    stats['registros_afetados'] += 1
+            
+            conn.commit()
+            logger.info(f"Limpeza de versões antigas: {stats['removidos']} versões removidas de {stats['registros_afetados']} registros")
+        
+        return stats
+    
+    def validate_database_integrity(self) -> Dict[str, Any]:
+        """
+        Valida integridade do banco de dados
+        
+        Returns:
+            Dicionário com resultados da validação
+        """
+        results = {
+            'integrity_check': 'OK',
+            'foreign_keys': 'OK',
+            'orphaned_records': {},
+            'errors': []
+        }
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Verificar integridade
+            cursor.execute("PRAGMA integrity_check")
+            integrity_result = cursor.fetchone()[0]
+            if integrity_result != 'ok':
+                results['integrity_check'] = integrity_result
+                results['errors'].append(f"Integridade comprometida: {integrity_result}")
+            
+            # Verificar foreign keys
+            cursor.execute("PRAGMA foreign_key_check")
+            fk_errors = cursor.fetchall()
+            if fk_errors:
+                results['foreign_keys'] = 'ERROR'
+                results['errors'].append(f"Erros de foreign key: {len(fk_errors)}")
+            
+            # Verificar registros órfãos em decision_history
+            cursor.execute("""
+                SELECT COUNT(*) FROM decision_history dh
+                LEFT JOIN portabilidade_records pr ON dh.record_id = pr.id
+                WHERE pr.id IS NULL
+            """)
+            orphaned_decisions = cursor.fetchone()[0]
+            if orphaned_decisions > 0:
+                results['orphaned_records']['decision_history'] = orphaned_decisions
+            
+            # Verificar registros órfãos em rules_log
+            cursor.execute("""
+                SELECT COUNT(*) FROM rules_log rl
+                LEFT JOIN portabilidade_records pr ON rl.record_id = pr.id
+                WHERE pr.id IS NULL
+            """)
+            orphaned_logs = cursor.fetchone()[0]
+            if orphaned_logs > 0:
+                results['orphaned_records']['rules_log'] = orphaned_logs
+        
+        return results
+    
+    def rebuild_indexes(self):
+        """Reconstrói todos os índices do banco"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Listar todos os índices
+            cursor.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='index' AND name NOT LIKE 'sqlite_%'
+            """)
+            indexes = [row[0] for row in cursor.fetchall()]
+            
+            for index_name in indexes:
+                try:
+                    cursor.execute(f"REINDEX {index_name}")
+                    logger.debug(f"Índice {index_name} reconstruído")
+                except Exception as e:
+                    logger.warning(f"Erro ao reconstruir índice {index_name}: {e}")
+            
+            conn.commit()
+            logger.info(f"Índices reconstruídos: {len(indexes)} índices processados")
+    
     # ==================== TEMPLATES WPP ====================
     
     def insert_template_wpp(self, template_data: Dict[str, Any]) -> int:
@@ -1057,5 +1443,324 @@ class DatabaseManager:
                 GROUP BY t.id
             """)
             stats['mapeamentos_por_template'] = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            return stats
+    
+    # ==================== RELATÓRIO DE OBJETOS (LOGÍSTICA) ====================
+    
+    def sync_relatorio_objetos(self, objects_loader) -> Dict[str, int]:
+        """
+        Sincroniza dados do ObjectsLoader para o banco de dados com versionamento
+        - Se não houver mudanças: apenas atualiza updated_at
+        - Se houver mudanças: cria nova versão (preserva histórico)
+        
+        Args:
+            objects_loader: Instância de ObjectsLoader já carregada
+            
+        Returns:
+            Dicionário com estatísticas da sincronização
+        """
+        if not objects_loader or not objects_loader.is_loaded:
+            logger.warning("ObjectsLoader não está carregado")
+            return {'processados': 0, 'inseridos': 0, 'novas_versoes': 0, 'sem_mudancas': 0, 'erros': 0}
+        
+        stats = {'processados': 0, 'inseridos': 0, 'novas_versoes': 0, 'sem_mudancas': 0, 'erros': 0}
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            for obj_record in objects_loader._records:
+                try:
+                    # Converter datas para string ISO
+                    data_criacao = obj_record.data_criacao_pedido.isoformat() if obj_record.data_criacao_pedido else None
+                    data_insercao = obj_record.data_insercao.isoformat() if obj_record.data_insercao else None
+                    previsao = obj_record.previsao_entrega.isoformat() if obj_record.previsao_entrega else None
+                    data_entrega = obj_record.data_entrega.isoformat() if obj_record.data_entrega else None
+                    
+                    # Criar registro_id_base único
+                    registro_id_base = f"{obj_record.nu_pedido}|{obj_record.codigo_externo}"
+                    
+                    # Buscar versão mais recente deste registro
+                    cursor.execute("""
+                        SELECT id, versao, id_erp, rastreio, destinatario, documento, telefone,
+                               cidade, uf, cep, data_criacao_pedido, data_insercao, status,
+                               transportadora, previsao_entrega, data_entrega, ultima_ocorrencia,
+                               ultima_ocorrencia_cronologica, local_ultima_ocorrencia,
+                               cidade_ultima_ocorrencia, estado_ultima_ocorrencia, iccid
+                        FROM relatorio_objetos 
+                        WHERE registro_id_base = ?
+                        ORDER BY versao DESC
+                        LIMIT 1
+                    """, (registro_id_base,))
+                    existing = cursor.fetchone()
+                    
+                    if existing:
+                        # Verificar se há mudanças significativas
+                        existing_dict = dict(zip([col[0] for col in cursor.description], existing))
+                        
+                        # Comparar campos críticos que podem mudar
+                        campos_criticos = {
+                            'id_erp': obj_record.id_erp,
+                            'rastreio': obj_record.rastreio,
+                            'iccid': obj_record.iccid,
+                            'status': obj_record.status,
+                            'data_entrega': data_entrega,
+                            'ultima_ocorrencia': obj_record.ultima_ocorrencia,
+                            'local_ultima_ocorrencia': obj_record.local_ultima_ocorrencia,
+                            'cidade_ultima_ocorrencia': obj_record.cidade_ultima_ocorrencia,
+                            'estado_ultima_ocorrencia': obj_record.estado_ultima_ocorrencia,
+                        }
+                        
+                        # Normalizar valores None para comparação
+                        def normalize_value(val):
+                            return str(val).strip() if val else ''
+                        
+                        mudancas = False
+                        for campo, novo_valor in campos_criticos.items():
+                            valor_existente = normalize_value(existing_dict.get(campo))
+                            valor_novo = normalize_value(novo_valor)
+                            if valor_existente != valor_novo:
+                                mudancas = True
+                                break
+                        
+                        if mudancas:
+                            # Criar nova versão (preservar histórico)
+                            nova_versao = existing_dict['versao'] + 1
+                            cursor.execute("""
+                                INSERT INTO relatorio_objetos (
+                                    registro_id_base, versao, nu_pedido, codigo_externo, id_erp, rastreio,
+                                    destinatario, documento, telefone, cidade, uf, cep,
+                                    data_criacao_pedido, data_insercao, status, transportadora,
+                                    previsao_entrega, data_entrega, ultima_ocorrencia,
+                                    ultima_ocorrencia_cronologica, local_ultima_ocorrencia,
+                                    cidade_ultima_ocorrencia, estado_ultima_ocorrencia, iccid
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                registro_id_base, nova_versao, obj_record.nu_pedido, obj_record.codigo_externo,
+                                obj_record.id_erp, obj_record.rastreio, obj_record.destinatario, obj_record.documento,
+                                obj_record.telefone, obj_record.cidade, obj_record.uf, obj_record.cep,
+                                data_criacao, data_insercao, obj_record.status, obj_record.transportadora,
+                                previsao, data_entrega, obj_record.ultima_ocorrencia,
+                                obj_record.ultima_ocorrencia_cronologica,
+                                obj_record.local_ultima_ocorrencia,
+                                obj_record.cidade_ultima_ocorrencia,
+                                obj_record.estado_ultima_ocorrencia,
+                                obj_record.iccid
+                            ))
+                            stats['novas_versoes'] += 1
+                        else:
+                            # Sem mudanças: apenas atualizar updated_at
+                            cursor.execute("""
+                                UPDATE relatorio_objetos 
+                                SET updated_at = CURRENT_TIMESTAMP
+                                WHERE id = ?
+                            """, (existing_dict['id'],))
+                            stats['sem_mudancas'] += 1
+                    else:
+                        # Inserir novo registro (versão 1)
+                        cursor.execute("""
+                            INSERT INTO relatorio_objetos (
+                                registro_id_base, versao, nu_pedido, codigo_externo, id_erp, rastreio,
+                                destinatario, documento, telefone, cidade, uf, cep,
+                                data_criacao_pedido, data_insercao, status, transportadora,
+                                previsao_entrega, data_entrega, ultima_ocorrencia,
+                                ultima_ocorrencia_cronologica, local_ultima_ocorrencia,
+                                cidade_ultima_ocorrencia, estado_ultima_ocorrencia, iccid
+                            ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            registro_id_base, obj_record.nu_pedido, obj_record.codigo_externo, obj_record.id_erp,
+                            obj_record.rastreio, obj_record.destinatario, obj_record.documento,
+                            obj_record.telefone, obj_record.cidade, obj_record.uf, obj_record.cep,
+                            data_criacao, data_insercao, obj_record.status, obj_record.transportadora,
+                            previsao, data_entrega, obj_record.ultima_ocorrencia,
+                            obj_record.ultima_ocorrencia_cronologica,
+                            obj_record.local_ultima_ocorrencia,
+                            obj_record.cidade_ultima_ocorrencia,
+                            obj_record.estado_ultima_ocorrencia,
+                            obj_record.iccid
+                        ))
+                        stats['inseridos'] += 1
+                    
+                    stats['processados'] += 1
+                    
+                except Exception as e:
+                    logger.error(f"Erro ao sincronizar registro do relatório de objetos: {e}")
+                    stats['erros'] += 1
+            
+            conn.commit()
+            logger.info(
+                f"Relatório de Objetos sincronizado: {stats['inseridos']} novos, "
+                f"{stats['novas_versoes']} novas versões, {stats['sem_mudancas']} sem mudanças, "
+                f"{stats['erros']} erros"
+            )
+        
+        return stats
+    
+    def get_relatorio_objeto_by_codigo(self, codigo_externo: str) -> Optional[Dict[str, Any]]:
+        """
+        Busca registro do Relatório de Objetos por código externo
+        Retorna a versão mais recente
+        
+        Args:
+            codigo_externo: Código externo (id_isize)
+            
+        Returns:
+            Dicionário com dados do registro ou None
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Buscar a versão mais recente (maior versão)
+            cursor.execute("""
+                SELECT * FROM relatorio_objetos 
+                WHERE codigo_externo = ?
+                ORDER BY versao DESC, data_insercao DESC, updated_at DESC
+                LIMIT 1
+            """, (codigo_externo,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def get_relatorio_objeto_by_cpf(self, cpf: str) -> Optional[Dict[str, Any]]:
+        """
+        Busca registro do Relatório de Objetos por CPF
+        Retorna a versão mais recente
+        
+        Args:
+            cpf: CPF do cliente
+            
+        Returns:
+            Dicionário com dados do registro ou None
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Limpar CPF (remover pontos e hífens)
+            cpf_limpo = ''.join(c for c in str(cpf) if c.isdigit())
+            # Buscar a versão mais recente (maior versão)
+            cursor.execute("""
+                SELECT * FROM relatorio_objetos 
+                WHERE documento = ?
+                ORDER BY versao DESC, data_insercao DESC, updated_at DESC
+                LIMIT 1
+            """, (cpf_limpo,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def get_relatorio_objeto_by_id_erp(self, id_erp: str) -> Optional[Dict[str, Any]]:
+        """
+        Busca registro do Relatório de Objetos por ID ERP (número da ordem)
+        Retorna a versão mais recente
+        
+        Args:
+            id_erp: ID ERP (ex: "1-1701687349481")
+            
+        Returns:
+            Dicionário com dados do registro ou None
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Buscar a versão mais recente (maior versão)
+            cursor.execute("""
+                SELECT * FROM relatorio_objetos 
+                WHERE id_erp = ?
+                ORDER BY versao DESC, data_insercao DESC, updated_at DESC
+                LIMIT 1
+            """, (id_erp,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def get_relatorio_objeto_best_match(
+        self, 
+        codigo_externo: Optional[str] = None,
+        id_erp: Optional[str] = None,
+        cpf: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Busca o melhor match do Relatório de Objetos usando múltiplas chaves
+        Prioridade: código_externo > id_erp > cpf
+        
+        Args:
+            codigo_externo: Código externo
+            id_erp: ID ERP / Número da ordem
+            cpf: CPF do cliente
+            
+        Returns:
+            Dicionário com dados do registro ou None
+        """
+        # Tentar por código externo primeiro
+        if codigo_externo:
+            result = self.get_relatorio_objeto_by_codigo(codigo_externo)
+            if result:
+                return result
+        
+        # Tentar por ID ERP
+        if id_erp:
+            result = self.get_relatorio_objeto_by_id_erp(id_erp)
+            if result:
+                return result
+        
+        # Tentar por CPF (fallback)
+        if cpf:
+            result = self.get_relatorio_objeto_by_cpf(cpf)
+            if result:
+                return result
+        
+        return None
+    
+    def get_relatorio_objetos_stats(self) -> Dict[str, Any]:
+        """
+        Retorna estatísticas do Relatório de Objetos no banco
+        
+        Returns:
+            Dicionário com estatísticas
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            stats = {}
+            
+            # Total de registros
+            cursor.execute("SELECT COUNT(*) FROM relatorio_objetos")
+            stats['total_registros'] = cursor.fetchone()[0]
+            
+            # Registros únicos por código externo (apenas versões mais recentes)
+            cursor.execute("""
+                SELECT COUNT(DISTINCT codigo_externo) 
+                FROM relatorio_objetos r1
+                WHERE r1.versao = (
+                    SELECT MAX(r2.versao) 
+                    FROM relatorio_objetos r2 
+                    WHERE r2.registro_id_base = r1.registro_id_base
+                )
+            """)
+            stats['codigos_unicos'] = cursor.fetchone()[0]
+            
+            # Total de versões (histórico)
+            cursor.execute("SELECT COUNT(*) FROM relatorio_objetos")
+            stats['total_versoes'] = cursor.fetchone()[0]
+            
+            # Registros com múltiplas versões
+            cursor.execute("""
+                SELECT COUNT(DISTINCT registro_id_base)
+                FROM relatorio_objetos
+                WHERE registro_id_base IN (
+                    SELECT registro_id_base 
+                    FROM relatorio_objetos 
+                    GROUP BY registro_id_base 
+                    HAVING COUNT(*) > 1
+                )
+            """)
+            stats['registros_com_historico'] = cursor.fetchone()[0]
+            
+            # Registros com ICCID
+            cursor.execute("SELECT COUNT(*) FROM relatorio_objetos WHERE iccid IS NOT NULL AND iccid != ''")
+            stats['com_iccid'] = cursor.fetchone()[0]
+            
+            # Registros com data de entrega
+            cursor.execute("SELECT COUNT(*) FROM relatorio_objetos WHERE data_entrega IS NOT NULL AND data_entrega != ''")
+            stats['entregues'] = cursor.fetchone()[0]
+            
+            # Última atualização
+            cursor.execute("SELECT MAX(updated_at) FROM relatorio_objetos")
+            result = cursor.fetchone()
+            stats['ultima_atualizacao'] = result[0] if result[0] else None
             
             return stats
