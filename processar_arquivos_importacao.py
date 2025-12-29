@@ -96,7 +96,10 @@ def processar_arquivos_importacao():
         # Sincronizar com o banco de dados
         logger.info("  Sincronizando Relatório de Objetos com banco de dados...")
         stats = db_manager.sync_relatorio_objetos(objects_loader)
-        logger.info(f"  >> {stats['inseridos']} inseridos, {stats['atualizados']} atualizados, {stats['erros']} erros")
+        logger.info(
+            f"  >> {stats['inseridos']} novos, {stats['novas_versoes']} novas versões, "
+            f"{stats['sem_mudancas']} sem mudanças, {stats['erros']} erros"
+        )
     else:
         logger.warning("\nNenhum Relatório de Objetos encontrado. Dados de logística não serão enriquecidos.")
     

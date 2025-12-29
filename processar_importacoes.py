@@ -97,7 +97,7 @@ def processar_arquivos():
             # Sincronizar com o banco de dados
             print("[3.1] Sincronizando Relatório de Objetos com banco de dados...")
             stats = db_manager.sync_relatorio_objetos(objects_loader)
-            print(f"    >> {stats['inseridos']} inseridos, {stats['atualizados']} atualizados, {stats['erros']} erros")
+            print(f"    >> {stats['inseridos']} novos, {stats['novas_versoes']} novas versões, {stats['sem_mudancas']} sem mudanças, {stats['erros']} erros")
         except Exception as e:
             print(f"    >> ERRO ao carregar: {e}")
             logger.error(f"Erro ao carregar Relatório de Objetos: {e}", exc_info=True)

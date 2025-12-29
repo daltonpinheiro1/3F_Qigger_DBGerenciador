@@ -1,6 +1,13 @@
 """
 Gerenciador de banco de dados para o sistema de portabilidade
-Versão 2.0 - Com suporte a triggers.xlsx e melhorias de DBA
+Versão 3.0 - Com versionamento completo, triggers.xlsx e melhorias de DBA
+
+Características:
+- Versionamento completo do relatorio_objetos (preserva histórico)
+- Verificação inteligente de mudanças (só cria versão se houver alterações)
+- Métodos de manutenção e otimização
+- Performance otimizada (cache 128MB, mmap 512MB)
+- Validação de integridade
 """
 import sqlite3
 import logging
