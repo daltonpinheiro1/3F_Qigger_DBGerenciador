@@ -976,6 +976,7 @@ def gerar_arquivo_homologacao():
             'Proposta_iSize': record.codigo_externo or '',
             'Cpf': record.cpf or '',
             'NomeCliente': nome_cliente_formatado,
+            '_vazia': '',  # Coluna vazia após NomeCliente
             'Telefone_Contato': telefone_contato,
             'Endereco': endereco_data['endereco'] or '',
             'Numero': endereco_data['numero'] or '',
@@ -1021,8 +1022,9 @@ def gerar_arquivo_homologacao():
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         if homologacao_data:
             # Ordem IMUTÁVEL das colunas principais (para Google Sheets)
+            # Coluna vazia após NomeCliente (usando chave especial que será escrita como vazia)
             colunas_principais = [
-                'Proposta_iSize', 'Cpf', 'NomeCliente', 'Telefone_Contato',
+                'Proposta_iSize', 'Cpf', 'NomeCliente', '_vazia', 'Telefone_Contato',
                 'Endereco', 'Numero', 'Complemento', 'Bairro', 'Cidade', 'UF', 'Cep', 'Ponto_Referencia',
                 'Cod_Rastreio', 'Data_Venda', 'Tipo_Comunicacao', 'Status_Disparo', 'DataHora_Disparo'
             ]
@@ -1034,12 +1036,24 @@ def gerar_arquivo_homologacao():
                 'Acao_Realizar'
             ]
             
-            # Ordem completa
+            # Ordem completa (substituir '_vazia' por string vazia no cabeçalho)
             fieldnames = colunas_principais + colunas_homologacao
             
+            # Escrever cabeçalho manualmente para ter coluna vazia
+            header_values = []
+            for field in fieldnames:
+                if field == '_vazia':
+                    header_values.append('')  # Coluna vazia no cabeçalho
+                else:
+                    header_values.append(field)
+            f.write(';'.join(header_values) + '\n')
+            
+            # Escrever dados
             writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=';', extrasaction='ignore')
-            writer.writeheader()
-            writer.writerows(homologacao_data)
+            for row in homologacao_data:
+                # Garantir que _vazia está sempre vazia
+                row['_vazia'] = ''
+                writer.writerow(row)
     
     print(f"    >> Arquivo salvo em: {output_path}")
     
