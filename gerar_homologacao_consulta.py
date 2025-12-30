@@ -31,9 +31,17 @@ logger = logging.getLogger(__name__)
 
 from src.database.db_manager import DatabaseManager
 
+# Importar BaseAnaliticaLoader
+try:
+    from gerar_homologacao_wpp import BaseAnaliticaLoader
+except ImportError:
+    BaseAnaliticaLoader = None
+    logger.warning("BaseAnaliticaLoader não encontrado. Filtro de crivo aprovada não estará disponível.")
+
 # Caminhos
 DB_PATH = "data/portabilidade.db"
 OUTPUT_PATH = Path("data/homologacao_consulta.csv")
+BASE_ANALITICA_PATH = Path(r"G:\Meu Drive\3F Contact Center\base_analitica_final.csv")
 
 
 def parse_date(date_str: str) -> Optional[date]:
@@ -119,6 +127,32 @@ def is_excluded_status(status_bilhete: str) -> bool:
     return status_str in excluded_statuses
 
 
+def is_crivo_aprovada(codigo_externo: str, cpf: str, base_analitica_loader) -> bool:
+    """Verifica se o registro tem crivo aprovada (Status venda = APROVADA)"""
+    if not base_analitica_loader or not base_analitica_loader.is_loaded:
+        return True  # Se não tiver base analítica, não filtra (mantém o registro)
+    
+    # Buscar na base analítica
+    base_match = base_analitica_loader.find_best_match(
+        codigo_externo=codigo_externo,
+        cpf=cpf
+    )
+    
+    if base_match is None:
+        return False  # Se não encontrar na base analítica, exclui
+    
+    # Verificar Status venda
+    status_venda = base_match.get('Status venda') or base_match.get('Status_venda') or base_match.get('Status Venda')
+    
+    if status_venda is None:
+        return False  # Se não tiver status venda, exclui
+    
+    status_venda_str = str(status_venda).strip().upper()
+    
+    # Considerar aprovada se for "APROVADA" (case insensitive)
+    return status_venda_str == "APROVADA"
+
+
 def gerar_homologacao_consulta():
     """Gera arquivo de homologação de consulta"""
     
@@ -130,11 +164,32 @@ def gerar_homologacao_consulta():
     print("  - Vendas novas (data conectada do mês vigente)")
     print("  - Sem rejeição de SMS")
     print("  - Não portado, falha parcial ou antigo")
+    print("  - Crivo aprovada (Status venda = APROVADA)")
     print()
     
     # Conectar ao banco
     print("[1] Conectando ao banco de dados...")
     db_manager = DatabaseManager(DB_PATH)
+    
+    # Carregar base analítica para verificar crivo aprovada
+    print("[1.1] Carregando base analítica...")
+    base_analitica_loader = None
+    if BaseAnaliticaLoader and BASE_ANALITICA_PATH.exists():
+        try:
+            base_analitica_loader = BaseAnaliticaLoader(str(BASE_ANALITICA_PATH))
+            count = base_analitica_loader.load()
+            print(f"    >> Base analítica carregada: {count:,} registros")
+        except Exception as e:
+            print(f"    >> ⚠ Erro ao carregar base analítica: {e}")
+            logger.warning(f"Erro ao carregar base analítica: {e}")
+            base_analitica_loader = None
+    else:
+        if not BASE_ANALITICA_PATH.exists():
+            print(f"    >> ⚠ Base analítica não encontrada: {BASE_ANALITICA_PATH}")
+            print("    >> Filtro de crivo aprovada será ignorado")
+        else:
+            print("    >> ⚠ BaseAnaliticaLoader não disponível")
+            print("    >> Filtro de crivo aprovada será ignorado")
     
     # Buscar todos os registros
     print("[2] Buscando registros do banco...")
@@ -157,6 +212,7 @@ def gerar_homologacao_consulta():
         'fora_mes_vigente': 0,
         'com_rejeicao_sms': 0,
         'status_excluido': 0,
+        'sem_crivo_aprovada': 0,
         'aprovados': 0
     }
     
@@ -192,6 +248,14 @@ def gerar_homologacao_consulta():
             stats['status_excluido'] += 1
             continue
         
+        # Verificar crivo aprovada (Status venda = APROVADA)
+        codigo_externo = record.get('codigo_externo', '').strip()
+        cpf = record.get('cpf', '').strip()
+        
+        if not is_crivo_aprovada(codigo_externo, cpf, base_analitica_loader):
+            stats['sem_crivo_aprovada'] += 1
+            continue
+        
         # Registro aprovado
         registros_filtrados.append(record)
         stats['aprovados'] += 1
@@ -200,6 +264,7 @@ def gerar_homologacao_consulta():
     print(f"    >> Registros fora do mês vigente: {stats['fora_mes_vigente']:,}")
     print(f"    >> Registros com rejeição de SMS: {stats['com_rejeicao_sms']:,}")
     print(f"    >> Registros com status excluído: {stats['status_excluido']:,}")
+    print(f"    >> Registros sem crivo aprovada: {stats['sem_crivo_aprovada']:,}")
     print(f"    >> Registros aprovados: {stats['aprovados']:,}")
     
     if not registros_filtrados:
@@ -255,6 +320,7 @@ def gerar_homologacao_consulta():
     print(f"  - Fora do mês vigente: {stats['fora_mes_vigente']:,}")
     print(f"  - Com rejeição de SMS: {stats['com_rejeicao_sms']:,}")
     print(f"  - Status excluído: {stats['status_excluido']:,}")
+    print(f"  - Sem crivo aprovada: {stats['sem_crivo_aprovada']:,}")
     print()
     print(f"✓ Arquivo gerado com sucesso: {OUTPUT_PATH.absolute()}")
     print("=" * 70)
