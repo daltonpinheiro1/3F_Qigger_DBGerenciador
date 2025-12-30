@@ -59,6 +59,14 @@ def encontrar_arquivo(pasta: Path, extensao: str) -> Path:
     return max(arquivos, key=lambda x: x.stat().st_mtime)
 
 
+def encontrar_todos_arquivos(pasta: Path, extensao: str) -> List[Path]:
+    """Encontra todos os arquivos com a extensão especificada, ordenados por data (mais recente primeiro)"""
+    arquivos = list(pasta.glob(f"*{extensao}"))
+    if not arquivos:
+        return []
+    return sorted(arquivos, key=lambda x: x.stat().st_mtime, reverse=True)
+
+
 def processar_arquivos():
     """Processa os arquivos de importação"""
     
@@ -69,13 +77,19 @@ def processar_arquivos():
     print()
     
     # Verificar se há arquivos para processar
-    arquivo_csv = encontrar_arquivo(PASTA_IMPORTACAO, ".csv")
+    arquivos_csv = encontrar_todos_arquivos(PASTA_IMPORTACAO, ".csv")
     arquivo_objetos = encontrar_arquivo(PASTA_IMPORTACAO, ".xlsx")
     
-    if not arquivo_csv and not arquivo_objetos:
+    if not arquivos_csv and not arquivo_objetos:
         print("Nenhum arquivo encontrado na pasta de importação.")
         print(f"Pasta: {PASTA_IMPORTACAO}")
         return
+    
+    if arquivos_csv:
+        print(f"Encontrados {len(arquivos_csv)} arquivo(s) CSV para processar:")
+        for i, arquivo in enumerate(arquivos_csv, 1):
+            print(f"  {i}. {arquivo.name}")
+        print()
     
     # 1. Inicializar banco de dados
     print("[1] Inicializando banco de dados...")
@@ -113,80 +127,129 @@ def processar_arquivos():
         objects_loader=objects_loader
     )
     
-    # 4. Processar CSV de Portabilidade
-    if not arquivo_csv:
+    # 4. Processar CSVs de Portabilidade
+    if not arquivos_csv:
         print("AVISO: Nenhum arquivo CSV encontrado!")
         print("Apenas o Relatório de Objetos será processado.")
         return
     
-    print(f"[5] Processando CSV: {arquivo_csv.name}")
+    total_registros_processados = 0
+    total_arquivos_processados = 0
+    arquivos_excluidos = []
     
-    try:
-        records = CSVParser.parse_file(str(arquivo_csv))
-        print(f"    >> {len(records)} registros parseados")
-    except Exception as e:
-        print(f"ERRO ao parsear CSV: {e}")
-        logger.error(f"Erro ao parsear CSV: {e}", exc_info=True)
+    for idx, arquivo_csv in enumerate(arquivos_csv, 1):
+        print(f"[5.{idx}] Processando CSV {idx}/{len(arquivos_csv)}: {arquivo_csv.name}")
+        
+        try:
+            records = CSVParser.parse_file(str(arquivo_csv))
+            print(f"    >> {len(records)} registros parseados")
+            
+            if not records:
+                print(f"    ⚠ Nenhum registro válido encontrado. Arquivo será mantido para verificação.")
+                continue
+            
+            # 5. Processar registros
+            print(f"[6.{idx}] Processando registros do arquivo {idx}...")
+            
+            try:
+                results_list = engine.process_records_batch(
+                    records, 
+                    generate_wpp_output=False,
+                    save_to_db=True
+                )
+                print(f"    >> {len(results_list)} registros processados")
+                total_registros_processados += len(results_list)
+                total_arquivos_processados += 1
+                
+                # Deletar arquivo após processamento bem-sucedido
+                if arquivo_csv.exists():
+                    arquivo_csv.unlink()
+                    arquivos_excluidos.append(arquivo_csv.name)
+                    print(f"    >> Arquivo deletado após processamento: {arquivo_csv.name}")
+                    logger.info(f"Arquivo CSV deletado após processamento: {arquivo_csv.name}")
+                
+            except Exception as e:
+                print(f"    ERRO ao processar registros: {e}")
+                logger.error(f"Erro ao processar registros do arquivo {arquivo_csv.name}: {e}", exc_info=True)
+                continue
+                
+        except Exception as e:
+            print(f"    ERRO ao parsear CSV: {e}")
+            logger.error(f"Erro ao parsear CSV {arquivo_csv.name}: {e}", exc_info=True)
+            continue
+    
+    if total_arquivos_processados == 0:
+        print("\n⚠ Nenhum arquivo foi processado com sucesso!")
         return
     
-    # 5. Processar registros
-    print("[6] Processando registros...")
-    
-    try:
-        results_list = engine.process_records_batch(
-            records, 
-            generate_wpp_output=False,
-            save_to_db=True
-        )
-        print(f"    >> {len(results_list)} registros processados")
-    except Exception as e:
-        print(f"ERRO ao processar registros: {e}")
-        logger.error(f"Erro ao processar registros: {e}", exc_info=True)
-        return
-    
-    # 6. Gerar amostra de validação
+    # 6. Gerar amostra de validação (apenas para o último arquivo processado)
     print("[7] Gerando amostra de validação de templates...")
     
+    # Buscar todos os registros processados do banco para a amostra
     amostra_data = []
     template_stats = {1: 0, 2: 0, 3: 0, 4: 0, 'sem_template': 0}
     
-    for record, results in results_list:
-        # Obter informações do template
-        template_info = TemplateMapper.get_template_for_record(record)
+    # Buscar registros recentes do banco para amostra (db_manager já foi criado anteriormente)
+    recent_records = db_manager.get_all_records(limit=1000)
+    
+    for record_dict in recent_records[:100]:  # Limitar a 100 para amostra
+        # Criar objeto record a partir do dict
+        from src.models.portabilidade import PortabilidadeRecord, PortabilidadeStatus, StatusOrdem
         
-        # Gerar link de rastreio
-        cod_rastreio = record.cod_rastreio
-        if not cod_rastreio or not str(cod_rastreio).startswith('http'):
+        # Converter dict para PortabilidadeRecord (simplificado para amostra)
+        try:
+            record = PortabilidadeRecord(
+                cpf=record_dict.get('cpf', ''),
+                numero_acesso=record_dict.get('numero_acesso', ''),
+                numero_ordem=record_dict.get('numero_ordem', ''),
+                codigo_externo=record_dict.get('codigo_externo', ''),
+                status_bilhete=CSVParser.parse_status_bilhete(record_dict.get('status_bilhete')),
+                status_ordem=CSVParser.parse_status_ordem(record_dict.get('status_ordem')),
+                tipo_mensagem=record_dict.get('tipo_mensagem'),
+                template=record_dict.get('template'),
+                mapeado=bool(record_dict.get('mapeado', 0)),
+                regra_id=record_dict.get('regra_id'),
+                o_que_aconteceu=record_dict.get('o_que_aconteceu'),
+                acao_a_realizar=record_dict.get('acao_a_realizar'),
+            )
+            
+            # Obter informações do template
+            template_info = TemplateMapper.get_template_for_record(record)
+            
+            # Gerar link de rastreio
             cod_rastreio = PortabilidadeRecord.gerar_link_rastreio(record.codigo_externo) or ''
-        
-        template_id = template_info.get('template_id')
-        if template_id:
-            template_stats[template_id] = template_stats.get(template_id, 0) + 1
-        else:
-            template_stats['sem_template'] += 1
-        
-        # Adicionar à amostra
-        amostra_data.append({
-            'CPF': record.cpf,
-            'Codigo_Externo': record.codigo_externo,
-            'Numero_Acesso': record.numero_acesso,
-            'Status_Bilhete': record.status_bilhete.value if record.status_bilhete else '',
-            'Status_Ordem': record.status_ordem.value if record.status_ordem else '',
-            'Tipo_Mensagem': record.tipo_mensagem or '',
-            'Template_Triggers': record.template or '',
-            'Template_ID': template_id or '',
-            'Template_Nome': template_info.get('nome_modelo') or '',
-            'Template_Variaveis': TemplateMapper.format_variables_string(template_info.get('variaveis', {})),
-            'Cod_Rastreio': cod_rastreio,
-            'Nome_Cliente': record.nome_cliente or '',
-            'Telefone': record.telefone_contato or record.numero_acesso,
-            'Cidade': record.cidade or '',
-            'UF': record.uf or '',
-            'Mapeado': 'SIM' if record.mapeado else 'NAO',
-            'Regra_ID': record.regra_id or '',
-            'O_Que_Aconteceu': record.o_que_aconteceu or '',
-            'Acao_Realizar': record.acao_a_realizar or '',
-        })
+            
+            template_id = template_info.get('template_id')
+            if template_id:
+                template_stats[template_id] = template_stats.get(template_id, 0) + 1
+            else:
+                template_stats['sem_template'] += 1
+            
+            # Adicionar à amostra
+            amostra_data.append({
+                'CPF': record.cpf,
+                'Codigo_Externo': record.codigo_externo,
+                'Numero_Acesso': record.numero_acesso,
+                'Status_Bilhete': record.status_bilhete.value if record.status_bilhete else '',
+                'Status_Ordem': record.status_ordem.value if record.status_ordem else '',
+                'Tipo_Mensagem': record.tipo_mensagem or '',
+                'Template_Triggers': record.template or '',
+                'Template_ID': template_id or '',
+                'Template_Nome': template_info.get('nome_modelo') or '',
+                'Template_Variaveis': TemplateMapper.format_variables_string(template_info.get('variaveis', {})),
+                'Cod_Rastreio': cod_rastreio,
+                'Nome_Cliente': '',
+                'Telefone': record.numero_acesso,
+                'Cidade': '',
+                'UF': '',
+                'Mapeado': 'SIM' if record.mapeado else 'NAO',
+                'Regra_ID': record.regra_id or '',
+                'O_Que_Aconteceu': record.o_que_aconteceu or '',
+                'Acao_Realizar': record.acao_a_realizar or '',
+            })
+        except Exception as e:
+            logger.debug(f"Erro ao processar registro para amostra: {e}")
+            continue
     
     # 7. Salvar amostra
     AMOSTRA_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
@@ -205,57 +268,51 @@ def processar_arquivos():
     print("ESTATÍSTICAS DE TEMPLATES")
     print("=" * 70)
     
+    total_amostra = len(amostra_data)
     for template_id, config in TEMPLATES.items():
         count = template_stats.get(template_id, 0)
-        pct = (count / len(records) * 100) if records else 0
+        pct = (count / total_amostra * 100) if total_amostra else 0
         print(f"  Template {template_id} ({config.nome_modelo}): {count} ({pct:.1f}%)")
     
     sem_template = template_stats.get('sem_template', 0)
-    pct_sem = (sem_template / len(records) * 100) if records else 0
+    pct_sem = (sem_template / total_amostra * 100) if total_amostra else 0
     print(f"  Sem template mapeado: {sem_template} ({pct_sem:.1f}%)")
     
     print()
     print("-" * 70)
     print("RESUMO DO PROCESSAMENTO")
     print("-" * 70)
-    print(f"  Total de registros: {len(records)}")
-    print(f"  Registros mapeados: {sum(1 for r, _ in results_list if r.mapeado)}")
-    print(f"  Registros não mapeados: {sum(1 for r, _ in results_list if not r.mapeado)}")
-    print(f"  Com dados de logística: {sum(1 for r, _ in results_list if r.nome_cliente)}")
-    print(f"  Com link de rastreio: {sum(1 for r, _ in results_list if r.cod_rastreio)}")
+    print(f"  Total de arquivos processados: {total_arquivos_processados}")
+    print(f"  Total de registros processados: {total_registros_processados}")
     
-    # 9. Excluir arquivos processados (após processamento bem-sucedido)
+    # Estatísticas do banco
+    stats = db_manager.get_statistics()
+    print(f"  Total de registros no banco: {stats['total_registros']:,}")
+    print(f"  Registros mapeados: {stats['registros_mapeados']:,}")
+    print(f"  Registros não mapeados: {stats['registros_nao_mapeados']:,}")
+    
+    # 9. Excluir Relatório de Objetos se processado
     print()
     print("-" * 70)
     print("LIMPEZA DE ARQUIVOS PROCESSADOS")
     print("-" * 70)
     
-    arquivos_excluidos = []
-    processamento_sucesso = len(results_list) > 0 and sum(1 for r, _ in results_list if r.mapeado) > 0
-    
-    if processamento_sucesso:
-        try:
-            if arquivo_csv and arquivo_csv.exists():
-                arquivo_csv.unlink()
-                arquivos_excluidos.append(arquivo_csv.name)
-                print(f"  >> Deletado: {arquivo_csv.name}")
-                logger.info(f"Arquivo CSV deletado após processamento: {arquivo_csv.name}")
-        except Exception as e:
-            print(f"  >> Erro ao deletar CSV: {e}")
-            logger.warning(f"Erro ao deletar CSV {arquivo_csv}: {e}")
+    if total_arquivos_processados > 0:
+        if arquivos_excluidos:
+            print(f"  >> {len(arquivos_excluidos)} arquivo(s) CSV deletado(s):")
+            for arquivo in arquivos_excluidos:
+                print(f"      - {arquivo}")
+        else:
+            print("  >> Nenhum arquivo CSV deletado")
         
         try:
             if arquivo_objetos and arquivo_objetos.exists():
                 arquivo_objetos.unlink()
-                arquivos_excluidos.append(arquivo_objetos.name)
                 print(f"  >> Deletado: {arquivo_objetos.name}")
                 logger.info(f"Arquivo Relatório de Objetos deletado após sincronização: {arquivo_objetos.name}")
         except Exception as e:
             print(f"  >> Erro ao deletar XLSX: {e}")
             logger.warning(f"Erro ao deletar XLSX {arquivo_objetos}: {e}")
-        
-        if not arquivos_excluidos:
-            print("  >> Nenhum arquivo excluído")
     else:
         print("  >> Processamento não foi bem-sucedido. Arquivos mantidos para reprocessamento.")
         logger.warning("Processamento não foi bem-sucedido. Arquivos não foram deletados.")
