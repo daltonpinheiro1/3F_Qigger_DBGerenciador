@@ -14,6 +14,7 @@ setup_windows_console()
 
 import logging
 import csv
+import pandas as pd
 
 # Configurar logging
 Path('logs').mkdir(exist_ok=True)
@@ -40,7 +41,7 @@ except ImportError:
 
 # Caminhos
 DB_PATH = "data/portabilidade.db"
-OUTPUT_PATH = Path("data/homologacao_consulta.csv")
+OUTPUT_PATH = Path("data/homologacao_consulta.xlsx")
 BASE_ANALITICA_PATH = Path(r"G:\Meu Drive\3F Contact Center\base_analitica_final.csv")
 
 
@@ -204,6 +205,8 @@ def gerar_homologacao_consulta():
     ano_atual = hoje.year
     
     print(f"    >> Mês vigente: {mes_atual:02d}/{ano_atual}")
+    print(f"    >> Data de hoje: {hoje.strftime('%d/%m/%Y')}")
+    print(f"    >> Considerando datas de: 01/{mes_atual:02d}/{ano_atual} até 31/{mes_atual:02d}/{ano_atual}")
     
     registros_filtrados = []
     stats = {
@@ -232,6 +235,9 @@ def gerar_homologacao_consulta():
         # Verificar se é do mês vigente
         if not is_current_month(data_conectada):
             stats['fora_mes_vigente'] += 1
+            # Log de exemplo para debug (apenas os primeiros 3)
+            if stats['fora_mes_vigente'] <= 3:
+                logger.debug(f"Registro fora do mês vigente: CPF={record.get('cpf')}, Data={data_conectada.strftime('%d/%m/%Y')}")
             continue
         
         # Verificar rejeição de SMS
@@ -272,9 +278,9 @@ def gerar_homologacao_consulta():
         print("⚠ Nenhum registro encontrado com os critérios especificados!")
         return 1
     
-    # Gerar CSV
+    # Gerar arquivo Excel
     print()
-    print("[4] Gerando arquivo CSV...")
+    print("[4] Gerando arquivo Excel...")
     
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     
@@ -284,28 +290,37 @@ def gerar_homologacao_consulta():
         reverse=True
     )
     
-    with open(OUTPUT_PATH, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.writer(f, delimiter='\t')  # Usar tab como separador (padrão Excel)
+    # Preparar dados para DataFrame
+    dados = []
+    for record in registros_filtrados:
+        dados.append({
+            'Cpf': record.get('cpf', '').strip(),
+            'Número de acesso': record.get('numero_acesso', '').strip(),
+            'Número da ordem': record.get('numero_ordem', '').strip(),
+            'Código externo': record.get('codigo_externo', '').strip()
+        })
+    
+    # Criar DataFrame
+    df = pd.DataFrame(dados)
+    
+    # Garantir que as colunas estejam na ordem correta
+    colunas = ['Cpf', 'Número de acesso', 'Número da ordem', 'Código externo']
+    df = df[colunas]
+    
+    # Salvar em Excel
+    with pd.ExcelWriter(OUTPUT_PATH, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Consulta')
         
-        # Cabeçalho
-        writer.writerow([
-            'Cpf',
-            'Número de acesso',
-            'Número da ordem',
-            'Código externo'
-        ])
-        
-        # Dados
-        for record in registros_filtrados:
-            writer.writerow([
-                record.get('cpf', '').strip(),
-                record.get('numero_acesso', '').strip(),
-                record.get('numero_ordem', '').strip(),
-                record.get('codigo_externo', '').strip()
-            ])
+        # Ajustar largura das colunas
+        worksheet = writer.sheets['Consulta']
+        worksheet.column_dimensions['A'].width = 15  # CPF
+        worksheet.column_dimensions['B'].width = 20   # Número de acesso
+        worksheet.column_dimensions['C'].width = 25   # Número da ordem
+        worksheet.column_dimensions['D'].width = 15   # Código externo
     
     print(f"    >> Arquivo gerado: {OUTPUT_PATH}")
     print(f"    >> Total de registros: {len(registros_filtrados):,}")
+    print(f"    >> Formato: Excel (.xlsx)")
     
     # Estatísticas finais
     print()
