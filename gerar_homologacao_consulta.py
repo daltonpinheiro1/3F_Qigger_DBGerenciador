@@ -293,11 +293,42 @@ def gerar_homologacao_consulta():
     # Preparar dados para DataFrame
     dados = []
     for record in registros_filtrados:
+        cpf = record.get('cpf', '').strip()
+        numero_acesso = record.get('numero_acesso', '').strip()
+        numero_ordem = record.get('numero_ordem', '').strip()
+        codigo_externo = record.get('codigo_externo', '').strip()
+        
+        # Se número da ordem estiver vazio ou for igual ao código externo (id_isize),
+        # tentar buscar da base analítica
+        if (not numero_ordem or numero_ordem == codigo_externo) and base_analitica_loader and base_analitica_loader.is_loaded:
+            base_match = base_analitica_loader.find_best_match(
+                codigo_externo=codigo_externo,
+                cpf=cpf
+            )
+            
+            if base_match is not None:
+                # Tentar buscar número OS ou número da ordem da base analítica
+                numero_os = base_match.get('Numero OS') or base_match.get('Numero_OS') or base_match.get('Número OS') or base_match.get('Número_OS')
+                numero_ordem_base = base_match.get('Numero Ordem') or base_match.get('Numero_Ordem') or base_match.get('Número Ordem') or base_match.get('Número_Ordem')
+                id_erp = base_match.get('ID ERP') or base_match.get('ID_ERP') or base_match.get('Id ERP') or base_match.get('Id_ERP')
+                
+                # Prioridade: Numero OS > Numero Ordem > ID ERP
+                if numero_os and pd.notna(numero_os):
+                    numero_ordem = str(numero_os).strip()
+                elif numero_ordem_base and pd.notna(numero_ordem_base):
+                    numero_ordem = str(numero_ordem_base).strip()
+                elif id_erp and pd.notna(id_erp):
+                    numero_ordem = str(id_erp).strip()
+        
+        # Se ainda estiver vazio ou igual ao código externo, manter vazio (não usar código externo como fallback)
+        if numero_ordem == codigo_externo:
+            numero_ordem = ''
+        
         dados.append({
-            'Cpf': record.get('cpf', '').strip(),
-            'Número de acesso': record.get('numero_acesso', '').strip(),
-            'Número da ordem': record.get('numero_ordem', '').strip(),
-            'Código externo': record.get('codigo_externo', '').strip()
+            'Cpf': cpf,
+            'Número de acesso': numero_acesso,
+            'Número da ordem': numero_ordem,
+            'Código externo': codigo_externo
         })
     
     # Criar DataFrame
@@ -311,12 +342,21 @@ def gerar_homologacao_consulta():
     with pd.ExcelWriter(OUTPUT_PATH, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Consulta')
         
-        # Ajustar largura das colunas
+        # Ajustar largura das colunas e formatar como valores
         worksheet = writer.sheets['Consulta']
         worksheet.column_dimensions['A'].width = 15  # CPF
         worksheet.column_dimensions['B'].width = 20   # Número de acesso
         worksheet.column_dimensions['C'].width = 25   # Número da ordem
         worksheet.column_dimensions['D'].width = 15   # Código externo
+        
+        # Formatar células como texto para preservar zeros à esquerda e evitar notação científica
+        from openpyxl.styles import NamedStyle
+        text_style = NamedStyle(name="text_style", number_format='@')
+        
+        # Aplicar formato de texto para todas as colunas (preserva valores como estão)
+        for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row):
+            for cell in row:
+                cell.number_format = '@'  # Formato texto
     
     print(f"    >> Arquivo gerado: {OUTPUT_PATH}")
     print(f"    >> Total de registros: {len(registros_filtrados):,}")
