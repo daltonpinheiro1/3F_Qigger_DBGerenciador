@@ -43,10 +43,18 @@ class ObjectRecord:
     cidade_ultima_ocorrencia: Optional[str] = None  # Cidade Última Ocorrência
     estado_ultima_ocorrencia: Optional[str] = None  # Estado Última Ocorrência
     iccid: Optional[str] = None  # ICCID ou chip_id
+    # Campos adicionais de endereço
+    endereco: Optional[str] = None
+    numero: Optional[str] = None
+    complemento: Optional[str] = None
+    bairro: Optional[str] = None
+    ponto_referencia: Optional[str] = None
+    # Colunas extras dinâmicas (para campos não mapeados do Excel)
+    colunas_extras: Optional[Dict[str, Any]] = None
     
     def to_dict(self) -> dict:
-        """Converte para dicionário"""
-        return {
+        """Converte para dicionário incluindo colunas extras"""
+        result = {
             'nu_pedido': self.nu_pedido,
             'codigo_externo': self.codigo_externo,
             'id_erp': self.id_erp,
@@ -63,7 +71,16 @@ class ObjectRecord:
             'transportadora': self.transportadora,
             'previsao_entrega': self.previsao_entrega.isoformat() if self.previsao_entrega else None,
             'data_entrega': self.data_entrega.isoformat() if self.data_entrega else None,
+            'endereco': self.endereco,
+            'numero': self.numero,
+            'complemento': self.complemento,
+            'bairro': self.bairro,
+            'ponto_referencia': self.ponto_referencia,
         }
+        # Adicionar colunas extras se existirem
+        if self.colunas_extras:
+            result.update(self.colunas_extras)
+        return result
 
 
 class ObjectsLoader:
@@ -198,6 +215,37 @@ class ObjectsLoader:
             # Formato: "26-0250015976" -> "250015976"
             codigo_externo = self._extract_codigo_externo(nu_pedido)
             
+            # Campos mapeados conhecidos
+            campos_mapeados = {
+                'Nu Pedido', 'ID ERP', 'Rastreio', 'Destinatário', 'Documento',
+                'Telefone', 'Cidade', 'UF', 'CEP', 'Data Criação Pedido',
+                'Data Inserção', 'Status', 'Transportadora', 'Previsão Entrega',
+                'Data Entrega', 'Última Ocorrencia', 'Ultima Ocorrencia',
+                'Última Ocorrência', 'Última Ocorrencia Cronológica',
+                'Ultima Ocorrencia Cronologica', 'Local Última Ocorrência',
+                'Local Ultima Ocorrencia', 'Cidade Última Ocorrência',
+                'Cidade Ultima Ocorrencia', 'Estado Última Ocorrência',
+                'Estado Ultima Ocorrencia', 'ICCID', 'Chip ID', 'chip_id',
+                'Chip_ID', 'Endereco', 'Endereço', 'Numero', 'Número',
+                'Complemento', 'Bairro', 'Ponto Referencia', 'Ponto Referência'
+            }
+            
+            # Coletar colunas extras (não mapeadas)
+            colunas_extras = {}
+            for col_name in row.index:
+                if col_name not in campos_mapeados:
+                    valor = self._clean_value(row.get(col_name))
+                    if valor:
+                        # Limpar nome da coluna para SQL
+                        col_sql = re.sub(r'[^a-zA-Z0-9_]', '_', str(col_name).lower().strip())
+                        col_sql = re.sub(r'_+', '_', col_sql).strip('_')
+                        if col_sql:
+                            # Converter datetime para ISO se necessário
+                            if isinstance(valor, datetime):
+                                colunas_extras[col_sql] = valor.isoformat()
+                            else:
+                                colunas_extras[col_sql] = str(valor)
+            
             return ObjectRecord(
                 nu_pedido=nu_pedido,
                 codigo_externo=codigo_externo,
@@ -221,6 +269,14 @@ class ObjectsLoader:
                 cidade_ultima_ocorrencia=self._clean_value(row.get('Cidade Última Ocorrência') or row.get('Cidade Ultima Ocorrencia')),
                 estado_ultima_ocorrencia=self._clean_value(row.get('Estado Última Ocorrência') or row.get('Estado Ultima Ocorrencia')),
                 iccid=self._clean_value(row.get('ICCID') or row.get('Chip ID') or row.get('chip_id') or row.get('Chip_ID')),
+                # Campos de endereço
+                endereco=self._clean_value(row.get('Endereco') or row.get('Endereço')),
+                numero=self._clean_value(row.get('Numero') or row.get('Número')),
+                complemento=self._clean_value(row.get('Complemento')),
+                bairro=self._clean_value(row.get('Bairro')),
+                ponto_referencia=self._clean_value(row.get('Ponto Referencia') or row.get('Ponto Referência')),
+                # Colunas extras dinâmicas
+                colunas_extras=colunas_extras if colunas_extras else None,
             )
             
         except Exception as e:
@@ -466,7 +522,7 @@ class ObjectsLoader:
     
     @staticmethod
     def _parse_date(value) -> Optional[datetime]:
-        """Parse de data com múltiplos formatos"""
+        """Parse de data com múltiplos formatos (expandido)"""
         if value is None:
             return None
         
@@ -477,21 +533,45 @@ class ObjectsLoader:
             return value.to_pydatetime()
         
         value_str = str(value).strip()
-        if not value_str or value_str.lower() in ['nan', 'none', 'nat']:
+        if not value_str or value_str.lower() in ['nan', 'none', 'nat', '']:
             return None
         
+        # Formatos suportados (do mais comum ao menos comum)
         formats = [
-            "%d/%m/%Y",
-            "%d/%m/%Y %H:%M:%S",
-            "%Y-%m-%d",
-            "%Y-%m-%d %H:%M:%S",
+            # Formatos brasileiros
+            "%d/%m/%Y",               # 17/07/2025
+            "%d/%m/%Y %H:%M:%S",      # 17/07/2025 08:00:00
+            "%d/%m/%Y %H:%M",         # 17/07/2025 08:00
+            "%d/%m/%Y %H:%M:%S.%f",   # 17/07/2025 08:00:00.123456
+            # Formatos ISO
+            "%Y-%m-%d",               # 2025-07-17
+            "%Y-%m-%d %H:%M:%S",      # 2025-07-17 08:00:00
+            "%Y-%m-%d %H:%M",         # 2025-07-17 08:00
+            "%Y-%m-%dT%H:%M:%S",      # 2025-07-17T08:00:00
+            "%Y-%m-%dT%H:%M:%S.%f",   # 2025-07-17T08:00:00.123456
+            "%Y-%m-%d %H:%M:%S.%f",   # 2025-07-17 08:00:00.123456
+            # Formatos alternativos
+            "%d-%m-%Y",               # 17-07-2025
+            "%d-%m-%Y %H:%M:%S",      # 17-07-2025 08:00:00
         ]
         
         for fmt in formats:
             try:
-                return datetime.strptime(value_str, fmt)
+                return datetime.strptime(value_str[:26], fmt)  # Limitar para microsegundos
             except ValueError:
                 continue
+        
+        # Tentar parse flexível como última opção
+        try:
+            # Remover timezone info se presente
+            if '+' in value_str:
+                value_str = value_str.split('+')[0].strip()
+            if 'T' in value_str:
+                value_str = value_str.replace('T', ' ')
+            # Tentar formato padrão
+            return datetime.fromisoformat(value_str[:26])
+        except (ValueError, TypeError):
+            pass
         
         return None
     

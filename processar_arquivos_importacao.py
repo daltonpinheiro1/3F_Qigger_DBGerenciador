@@ -40,10 +40,17 @@ from src.database import DatabaseManager
 from src.utils import CSVParser, ObjectsLoader, WPPOutputGenerator
 from src.utils.file_output_manager import FileOutputManager
 
-# Caminhos de configuração
-TRIGGERS_PATH = Path(__file__).parent / "triggers.xlsx"
-PASTA_IMPORTACAO = Path(r"C:\Users\dspin\OneDrive\Documents\IMPORTACOES_QIGGER")
-WPP_OUTPUT_PATH = Path(r"G:\Meu Drive\3F Contact Center\WPP_Regua_Output.csv")
+# Caminhos de configuração (usar config centralizado)
+try:
+    from config import TRIGGERS_PATH, PASTA_IMPORTACOES, WPP_OUTPUT_PATH
+    TRIGGERS_PATH = Path(TRIGGERS_PATH)
+    PASTA_IMPORTACAO = Path(PASTA_IMPORTACOES)
+    WPP_OUTPUT_PATH = Path(WPP_OUTPUT_PATH)
+except ImportError:
+    # Fallback se config.py não existir
+    TRIGGERS_PATH = Path(__file__).parent / "triggers.xlsx"
+    PASTA_IMPORTACAO = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
+    WPP_OUTPUT_PATH = Path(__file__).parent / "data" / "WPP_Regua_Output.csv"
 
 def processar_arquivos_importacao():
     """Processa todos os arquivos CSV na pasta de importação"""
@@ -83,6 +90,10 @@ def processar_arquivos_importacao():
     for arquivo in arquivos_csv:
         logger.info(f"  - {arquivo.name}")
     
+    # Inicializar componentes PRIMEIRO (antes de usar db_manager)
+    db_path = "data/portabilidade.db"
+    db_manager = DatabaseManager(db_path)
+    
     # Carregar e sincronizar Relatório de Objetos (logística) se existir
     objects_loader = None
     arquivo_objetos = None
@@ -95,19 +106,15 @@ def processar_arquivos_importacao():
         
         # Sincronizar com o banco de dados
         logger.info("  Sincronizando Relatório de Objetos com banco de dados...")
-        stats = db_manager.sync_relatorio_objetos(objects_loader)
+        sync_stats = db_manager.sync_relatorio_objetos(objects_loader)
         logger.info(
-            f"  >> {stats['inseridos']} novos, {stats['novas_versoes']} novas versões, "
-            f"{stats['sem_mudancas']} sem mudanças, {stats['erros']} erros"
+            f"  >> {sync_stats['inseridos']} novos, {sync_stats['novas_versoes']} novas versões, "
+            f"{sync_stats['sem_mudancas']} sem mudanças, {sync_stats['erros']} erros"
         )
     else:
         logger.warning("\nNenhum Relatório de Objetos encontrado. Dados de logística não serão enriquecidos.")
     
     logger.info("")
-    
-    # Inicializar componentes
-    db_path = "data/portabilidade.db"
-    db_manager = DatabaseManager(db_path)
     
     # Criar pasta de saída WPP se necessário
     WPP_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

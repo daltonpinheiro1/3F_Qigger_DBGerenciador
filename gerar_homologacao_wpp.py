@@ -43,10 +43,19 @@ from src.models.portabilidade import PortabilidadeRecord
 from typing import Dict, Optional
 import pandas as pd
 
-# Caminhos
-DB_PATH = "data/portabilidade.db"
-OUTPUT_HOMOLOGACAO = Path("data/homologacao_wpp.csv")
-BASE_ANALITICA_PATH = Path(r"G:\Meu Drive\3F Contact Center\base_analitica_final.csv")
+# Caminhos (usar config centralizado)
+try:
+    from config import DB_PATH, OUTPUT_WPP
+    DB_PATH = DB_PATH
+    OUTPUT_HOMOLOGACAO = Path(OUTPUT_WPP)
+    # Base analítica agora vem do banco unificado (base_unificada) ou Excel processado
+    # Não precisa mais do arquivo CSV separado
+    BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
+except ImportError:
+    # Fallback se config.py não existir
+    DB_PATH = "data/portabilidade.db"
+    OUTPUT_HOMOLOGACAO = Path("data/homologacao_wpp.csv")
+    BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 
 # Palavras a ignorar ao extrair primeiro e último nome
 PALAVRAS_IGNORAR = {'e', 'de', 'da', 'do', 'das', 'dos', 'em', 'na', 'no', 'nas', 'nos'}
@@ -119,6 +128,105 @@ def normalizar_cep(cep: str) -> str:
     return cep_normalizado
 
 
+# Padrões de valores inválidos para número de endereço
+VALORES_NUMERO_INVALIDO = {
+    'sn', 's/n', 's.n', 's.n.', 'n/a', 'na', 'n.a', 'n.a.',
+    'nao tem', 'não tem', 'sem numero', 'sem número', 
+    'sem', 'nenhum', 'null', 'none', '-', '--', '.',
+    '0', '00', '000', 'zero'
+}
+
+# Padrões de complementos a extrair do número
+PADROES_COMPLEMENTO = [
+    r'\s*-?\s*bl\.?\s*(\w+)',           # BL A, BL. A, - BL A
+    r'\s*-?\s*bloco\.?\s*(\w+)',         # Bloco A
+    r'\s*-?\s*apto?\.?\s*(\d+\w*)',       # Apt 101, Apto. 101A
+    r'\s*-?\s*apartamento\.?\s*(\d+\w*)', # Apartamento 101
+    r'\s*-?\s*sala\.?\s*(\d+\w*)',        # Sala 101
+    r'\s*-?\s*loja\.?\s*(\d+\w*)',        # Loja 01
+    r'\s*-?\s*casa\.?\s*(\d+\w*)',        # Casa 2
+    r'\s*-?\s*fundos',                    # Fundos
+    r'\s*-?\s*frente',                    # Frente
+    r'\s*-?\s*lado\.?\s*(\w+)',           # Lado A
+    r'\s*-?\s*(\d+)\s*andar',             # 2 andar
+    r'\s*-?\s*andar\.?\s*(\d+)',          # Andar 2
+    r'\s+([A-Za-z])$',                    # Termina com letra (150 B -> numero=150, complemento=B)
+]
+
+import re
+
+def normalizar_numero_endereco(numero: str, complemento_existente: str = "") -> tuple:
+    """
+    Normaliza número de endereço:
+    - Se for sn, n/a, S/N, não tem, etc. -> retorna "0"
+    - Se tiver complementos como "B", "fundos", extrai e adiciona ao complemento
+    
+    Args:
+        numero: Número do endereço (pode conter complementos)
+        complemento_existente: Complemento já existente
+        
+    Returns:
+        Tupla (numero_normalizado, complemento_atualizado)
+    """
+    if not numero:
+        return "0", complemento_existente
+    
+    numero_str = str(numero).strip()
+    
+    # Verificar se é valor inválido (sn, n/a, etc.)
+    numero_lower = numero_str.lower().strip()
+    if numero_lower in VALORES_NUMERO_INVALIDO:
+        return "0", complemento_existente
+    
+    # Se não tem dígitos, é inválido
+    if not any(c.isdigit() for c in numero_str):
+        # Pode ser só complemento (ex: "Fundos")
+        complemento_novo = numero_str
+        if complemento_existente:
+            complemento_novo = f"{complemento_existente} - {numero_str}"
+        return "0", complemento_novo
+    
+    # Extrair número e possíveis complementos
+    numero_limpo = numero_str
+    complemento_extraido = []
+    
+    # Verificar cada padrão de complemento
+    for padrao in PADROES_COMPLEMENTO:
+        match = re.search(padrao, numero_str, re.IGNORECASE)
+        if match:
+            # Extrair o que foi encontrado
+            texto_match = match.group(0).strip()
+            complemento_extraido.append(texto_match.strip(' -'))
+            # Remover do número
+            numero_limpo = re.sub(padrao, '', numero_limpo, flags=re.IGNORECASE).strip()
+    
+    # Se o número restante tem letra isolada no final (ex: "150 B")
+    match_letra = re.match(r'^(\d+)\s*([A-Za-z])$', numero_limpo)
+    if match_letra:
+        numero_limpo = match_letra.group(1)
+        complemento_extraido.append(match_letra.group(2).upper())
+    
+    # Limpar número - pegar só os dígitos iniciais
+    numero_final = ''.join(c for c in numero_limpo if c.isdigit())
+    
+    # Se não sobrou número válido
+    if not numero_final:
+        numero_final = "0"
+    
+    # Montar complemento final
+    complemento_final = complemento_existente or ""
+    if complemento_extraido:
+        novo_complemento = " ".join(complemento_extraido)
+        if complemento_final:
+            # Não duplicar se já existir
+            if novo_complemento.lower() not in complemento_final.lower():
+                complemento_final = f"{complemento_final} - {novo_complemento}"
+        else:
+            complemento_final = novo_complemento
+    
+    return numero_final, complemento_final.strip(' -')
+
+
 def normalizar_data_venda(data) -> str:
     """
     Normaliza data de venda para formato DD/MM/AAAA
@@ -145,7 +253,7 @@ def normalizar_data_venda(data) -> str:
                     return dt.strftime('%d/%m/%Y')
                 except ValueError:
                     continue
-        except:
+        except (AttributeError, TypeError):
             pass
         return data.strip()
     
@@ -500,17 +608,98 @@ def gerar_arquivo_homologacao():
     print("[1] Conectando ao banco de dados...")
     db_manager = DatabaseManager(DB_PATH)
     
-    # 2. Buscar registros com template
-    print("[2] Buscando registros com template mapeado...")
+    # 2. Buscar registros com template sincronizando todas as tabelas do portabilidade.db
+    print("[2] Buscando registros com template mapeado (sincronizando todas as tabelas)...")
     
     with db_manager._get_connection() as conn:
         cursor = conn.cursor()
         
-        # Buscar registros que têm template e estão mapeados
-        cursor.execute("""
+        # Verificar quais tabelas existem
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tabelas_existentes = [row[0] for row in cursor.fetchall()]
+        tem_base_coverte = 'base_coverte_prop' in tabelas_existentes
+        tem_relatorio_objetos = 'relatorio_objetos' in tabelas_existentes
+        
+        if tem_base_coverte:
+            print("    >> Usando base_coverte_prop + portabilidade_records" + (" + relatorio_objetos" if tem_relatorio_objetos else ""))
+        else:
+            print("    >> Tabela base_coverte_prop não encontrada, usando apenas portabilidade_records")
+        
+        # Buscar registros ÚNICOS por codigo_externo, priorizando base_coverte_prop como fonte principal
+        # Remove duplicados usando GROUP BY garantindo um único registro por codigo_externo
+        if tem_base_coverte:
+            query = """
             SELECT 
+                -- Dados de portabilidade_records
+                MAX(pr.id) AS id, 
+                COALESCE(MAX(bc.cpf), MAX(pr.cpf)""" + (", MAX(ro.documento)" if tem_relatorio_objetos else "") + """, '') AS cpf,
+                COALESCE(MAX(pr.numero_acesso), '') AS numero_acesso,
+                COALESCE(MAX(bc.numero_ordem), MAX(pr.numero_ordem), '') AS numero_ordem,
+                COALESCE(bc.proposta_isize, bc.codigo_externo, pr.codigo_externo""" + (", ro.codigo_externo" if tem_relatorio_objetos else "") + """, '') AS codigo_externo,
+                
+                -- Template e regras (priorizar dados existentes)
+                COALESCE(MAX(pr.tipo_mensagem), '') AS tipo_mensagem,
+                COALESCE(MAX(pr.template), '1') AS template,
+                MAX(pr.regra_id) AS regra_id,
+                COALESCE(MAX(pr.o_que_aconteceu), '') AS o_que_aconteceu,
+                COALESCE(MAX(pr.acao_a_realizar), '') AS acao_a_realizar,
+                
+                -- Dados adicionais de base_coverte_prop (FONTE PRINCIPAL)
+                MAX(bc.cliente_nome) AS cliente_nome,
+                MAX(bc.telefone_portado) AS telefone_portado,
+                MAX(bc.data_venda) AS data_venda,
+                MAX(bc.plano) AS plano,
+                MAX(bc.endereco) AS endereco,
+                MAX(bc.numero) AS numero,
+                MAX(bc.complemento) AS complemento,
+                MAX(bc.bairro) AS bairro,
+                MAX(bc.cidade) AS cidade,
+                MAX(bc.uf) AS uf,
+                MAX(bc.cep) AS cep,
+                MAX(bc.ponto_referencia) AS ponto_referencia,
+                
+                -- Dados de logística (relatorio_objetos)
+                """ + ("""
+                MAX(ro.nu_pedido) AS nu_pedido,
+                MAX(ro.rastreio) AS rastreio,
+                MAX(ro.status) AS ro_status
+                """ if tem_relatorio_objetos else """
+                NULL AS nu_pedido,
+                NULL AS rastreio,
+                NULL AS ro_status
+                """) + """
+                
+            FROM base_coverte_prop bc
+            LEFT JOIN portabilidade_records pr ON (
+                TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) = 
+                TRIM(COALESCE(CAST(pr.codigo_externo AS TEXT), ''))
+            )
+            """ + ("""
+            LEFT JOIN relatorio_objetos ro ON (
+                TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) = 
+                TRIM(COALESCE(CAST(ro.codigo_externo AS TEXT), ''))
+            )
+            """ if tem_relatorio_objetos else "") + """
+            WHERE bc.proposta_isize IS NOT NULL 
+              AND TRIM(COALESCE(bc.proposta_isize, bc.codigo_externo, '')) != ''
+              AND (pr.template IS NOT NULL OR bc.data_venda >= '2026-01-01')
+            GROUP BY COALESCE(bc.proposta_isize, bc.codigo_externo, pr.codigo_externo""" + (", ro.codigo_externo" if tem_relatorio_objetos else "") + """, '')
+            ORDER BY MAX(bc.data_venda) DESC NULLS LAST
+            LIMIT 5000
+            """
+        else:
+            # Fallback: usar apenas portabilidade_records
+            query = """
+            SELECT DISTINCT
                 id, cpf, numero_acesso, numero_ordem, codigo_externo,
-                tipo_mensagem, template, regra_id, o_que_aconteceu, acao_a_realizar
+                tipo_mensagem, template, regra_id, o_que_aconteceu, acao_a_realizar,
+                NULL AS cliente_nome,
+                NULL AS telefone_portado,
+                NULL AS data_venda,
+                NULL AS plano,
+                NULL AS ro_nu_pedido,
+                NULL AS ro_rastreio,
+                NULL AS ro_status
             FROM portabilidade_records
             WHERE template IS NOT NULL 
               AND template != ''
@@ -518,9 +707,11 @@ def gerar_arquivo_homologacao():
               AND mapeado = 1
             ORDER BY id DESC
             LIMIT 1000
-        """)
+            """
         
+        cursor.execute(query)
         rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
         print(f"    >> {len(rows)} registros encontrados")
     
     if not rows:
@@ -536,7 +727,12 @@ def gerar_arquivo_homologacao():
     # Tentar carregar Relatório de Objetos para enriquecimento
     print("[2.1] Tentando carregar Relatório de Objetos para enriquecimento...")
     objects_loader = None
-    pasta_importacao = Path(r"C:\Users\dspin\OneDrive\Documents\IMPORTACOES_QIGGER")
+    # Usar caminho do config ou caminho local do Mac
+    try:
+        from config import PASTA_IMPORTACOES
+        pasta_importacao = Path(PASTA_IMPORTACOES)
+    except ImportError:
+        pasta_importacao = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
     arquivo_objetos = None
     if pasta_importacao.exists():
         arquivos_xlsx = list(pasta_importacao.glob("*.xlsx"))
@@ -551,7 +747,22 @@ def gerar_arquivo_homologacao():
     # Carregar Base Analítica Final como fonte adicional
     print("[2.2] Tentando carregar Base Analítica Final...")
     base_analitica_loader = None
-    if BASE_ANALITICA_PATH.exists():
+    # Base analítica agora vem do banco unificado (base_unificada) ou base_coverte_prop
+    # Verificar se há dados nas tabelas
+    with db_manager._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM base_unificada")
+        total_base = cursor.fetchone()[0]
+        tem_base_unificada = total_base > 0
+        
+        cursor.execute("SELECT COUNT(*) FROM base_coverte_prop")
+        total_coverte = cursor.fetchone()[0]
+        tem_base_coverte = total_coverte > 0
+        
+        if tem_base_coverte:
+            print(f"    >> {total_coverte:,} registros encontrados na base_coverte_prop (COVERTE BASE PROP)")
+    
+    if BASE_ANALITICA_PATH and BASE_ANALITICA_PATH.exists() and BASE_ANALITICA_PATH != Path("/dev/null"):
         try:
             base_analitica_loader = BaseAnaliticaLoader(str(BASE_ANALITICA_PATH))
             count = base_analitica_loader.load()
@@ -559,31 +770,70 @@ def gerar_arquivo_homologacao():
                 print(f"    >> {count} registros da base analítica carregados")
         except Exception as e:
             print(f"    >> Erro ao carregar base analítica: {e}")
-    else:
-        print(f"    >> Arquivo base analítica não encontrado: {BASE_ANALITICA_PATH}")
+    elif not tem_base_unificada:
+        print(f"    >> Base analítica não encontrada (nem no banco nem em arquivo)")
     
     for row in rows:
-        # Criar registro básico
+        # Converter row para dict usando colunas
+        row_dict = dict(zip(columns, row))
+        
+        # Criar registro básico usando dados sincronizados
         record = PortabilidadeRecord(
-            cpf=row[1] or "",
-            numero_acesso=row[2] or "",
-            numero_ordem=row[3] or "",
-            codigo_externo=row[4] or "",
-            tipo_mensagem=row[5] or "",
-            template=row[6] or "",
-            regra_id=row[7],
-            o_que_aconteceu=row[8] or "",
-            acao_a_realizar=row[9] or "",
+            cpf=str(row_dict.get('cpf', '') or '').strip(),
+            numero_acesso=str(row_dict.get('numero_acesso', '') or '').strip(),
+            numero_ordem=str(row_dict.get('numero_ordem', '') or '').strip(),
+            codigo_externo=str(row_dict.get('codigo_externo', '') or '').strip(),
+            tipo_mensagem=str(row_dict.get('tipo_mensagem', '') or '').strip(),
+            template=str(row_dict.get('template', '') or '').strip(),
+            regra_id=row_dict.get('regra_id'),
+            o_que_aconteceu=str(row_dict.get('o_que_aconteceu', '') or '').strip(),
+            acao_a_realizar=str(row_dict.get('acao_a_realizar', '') or '').strip(),
         )
         
-        # Enriquecer com dados de logística - buscar TODOS os matches para garantir endereço completo
+        # Preencher dados adicionais de base_coverte_prop se disponíveis
+        if row_dict.get('cliente_nome'):
+            record.nome_cliente = str(row_dict['cliente_nome']).strip() if row_dict.get('cliente_nome') else ''
+        if row_dict.get('telefone_portado'):
+            record.telefone_contato = str(row_dict['telefone_portado']).strip()
+        if row_dict.get('data_venda'):
+            try:
+                from datetime import datetime as dt_parser
+                data_venda_str = str(row_dict['data_venda']).strip()
+                if data_venda_str:
+                    # Tentar parsear diferentes formatos
+                    for fmt in ['%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%d/%m/%Y', '%d/%m/%Y %H:%M:%S']:
+                        try:
+                            record.data_venda = dt_parser.strptime(data_venda_str[:19] if len(data_venda_str) > 19 else data_venda_str, fmt)
+                            break
+                        except ValueError:
+                            continue
+            except (ValueError, TypeError, AttributeError):
+                pass
+        
+        # Preencher dados de endereço diretamente da query SQL (base_coverte_prop)
+        numero_bruto = str(row_dict.get('numero', '')).strip() if row_dict.get('numero') else ''
+        complemento_bruto = str(row_dict.get('complemento', '')).strip() if row_dict.get('complemento') else ''
+        
+        # Normalizar número e extrair complementos (sn, n/a, S/N -> 0, "150 B" -> numero=150, complemento=B)
+        numero_normalizado, complemento_atualizado = normalizar_numero_endereco(numero_bruto, complemento_bruto)
+        
         endereco_data = {
-            'endereco': '',
-            'numero': '',
-            'complemento': '',
-            'bairro': '',
-            'ponto_referencia': '',
+            'endereco': str(row_dict.get('endereco', '')).strip() if row_dict.get('endereco') else '',
+            'numero': numero_normalizado,
+            'complemento': complemento_atualizado,
+            'bairro': str(row_dict.get('bairro', '')).strip() if row_dict.get('bairro') else '',
+            'ponto_referencia': str(row_dict.get('ponto_referencia', '')).strip() if row_dict.get('ponto_referencia') else ''
         }
+        
+        # Preencher cidade, UF e CEP diretamente da query SQL
+        if row_dict.get('cidade'):
+            record.cidade = str(row_dict['cidade']).strip()
+        if row_dict.get('uf'):
+            record.uf = str(row_dict['uf']).strip()
+        if row_dict.get('cep'):
+            record.cep = str(row_dict['cep']).strip()
+        
+        # Enriquecer com dados de logística - buscar TODOS os matches para garantir endereço completo (se não tiver na query)
         
         obj_match = None
         nu_pedido_encontrado = None
@@ -686,10 +936,20 @@ def gerar_arquivo_homologacao():
                 record.data_venda = getattr(obj_match, 'data_criacao_pedido', None) or getattr(obj_match, 'data_venda', None) or record.data_venda
                 record.status_logistica = getattr(obj_match, 'status', None) or getattr(obj_match, 'status_logistica', None) or record.status_logistica or ""
                 
-                # Dados de endereço do ObjectRecord
+                # Dados de endereço do ObjectRecord (normalizar número)
                 endereco_data['endereco'] = getattr(obj_match, 'endereco', '') or endereco_data['endereco'] or ''
-                endereco_data['numero'] = getattr(obj_match, 'numero', '') or endereco_data['numero'] or ''
-                endereco_data['complemento'] = getattr(obj_match, 'complemento', '') or endereco_data['complemento'] or ''
+                
+                # Normalizar número do ObjectRecord
+                numero_obj = getattr(obj_match, 'numero', '') or ''
+                complemento_obj = getattr(obj_match, 'complemento', '') or ''
+                if numero_obj and not endereco_data['numero']:
+                    numero_norm, compl_norm = normalizar_numero_endereco(numero_obj, complemento_obj)
+                    endereco_data['numero'] = numero_norm
+                    if compl_norm and not endereco_data['complemento']:
+                        endereco_data['complemento'] = compl_norm
+                elif complemento_obj and not endereco_data['complemento']:
+                    endereco_data['complemento'] = complemento_obj
+                
                 endereco_data['bairro'] = getattr(obj_match, 'bairro', '') or endereco_data['bairro'] or ''
                 endereco_data['ponto_referencia'] = getattr(obj_match, 'ponto_referencia', '') or endereco_data['ponto_referencia'] or ''
                 
@@ -727,28 +987,55 @@ def gerar_arquivo_homologacao():
                         if isinstance(data_conexao, str):
                             try:
                                 data_conexao = dt_parser.strptime(data_conexao, '%Y-%m-%d %H:%M:%S')
-                            except:
+                            except ValueError:
                                 try:
                                     data_conexao = dt_parser.strptime(data_conexao, '%Y-%m-%d')
-                                except:
+                                except ValueError:
                                     data_conexao = None
                         record.data_venda = data_conexao
         
+        # Buscar dados na base_coverte_prop (COVERTE BASE PROP) se disponível
+        base_coverte_match = None
+        if tem_base_coverte:
+            with db_manager._get_connection() as conn:
+                cursor = conn.cursor()
+                # Buscar por CPF, codigo_externo ou numero_ordem
+                cursor.execute("""
+                    SELECT * FROM base_coverte_prop
+                    WHERE (cpf = ? OR codigo_externo = ? OR numero_ordem = ?)
+                    LIMIT 1
+                """, (record.cpf or '', record.codigo_externo or '', record.numero_ordem or ''))
+                row = cursor.fetchone()
+                if row:
+                    # Converter para dict usando nomes das colunas
+                    col_names = [desc[0] for desc in cursor.description]
+                    base_coverte_match = dict(zip(col_names, row))
+        
         # Sempre buscar na Base Analítica Final para preencher endereços e dados faltantes
+        base_match = None
         if base_analitica_loader and base_analitica_loader.is_loaded:
             # Buscar sempre (mesmo que já tenha alguns dados, pode ter endereço completo)
             base_match = base_analitica_loader.find_best_match(
                 codigo_externo=record.codigo_externo,
                 cpf=record.cpf
             )
+        
+        # Priorizar base_coverte_prop se disponível (é a fonte mais atual)
+        if base_coverte_match:
+            base_match = base_coverte_match
+        
+        if base_match:
             
-            if base_match is not None:
-                    # Preencher dados que estão faltando
-                    # Mapear colunas da base analítica (nomes exatos das colunas)
-                    if not record.nome_cliente:
-                        nome = base_match.get('Cliente')
-                        if pd.notna(nome) and nome:
-                            record.nome_cliente = str(nome).strip()
+            # Preencher dados que estão faltando
+            # Mapear colunas da base analítica ou base_coverte_prop
+            if not record.nome_cliente:
+                # Tentar diferentes nomes de coluna
+                nome = (base_match.get('Cliente') or 
+                       base_match.get('cliente_nome') or
+                       base_match.get('Destinatário') or
+                       base_match.get('destinatario'))
+                if nome and (not isinstance(nome, float) or not pd.isna(nome)):
+                    record.nome_cliente = str(nome).strip()
                     
                     # Preencher telefone da Base Analítica com PRIORIDADE ESPECÍFICA:
                     # 1. PRIMEIRO: "Telefone Portabilidade" (se não vazio)
@@ -757,8 +1044,10 @@ def gerar_arquivo_homologacao():
                     telefone_final = None
                     
                     # PRIORIDADE 1: Telefone Portabilidade
-                    telefone_portabilidade = base_match.get('Telefone Portabilidade')
-                    if pd.notna(telefone_portabilidade) and telefone_portabilidade:
+                    telefone_portabilidade = (base_match.get('Telefone Portabilidade') or 
+                                             base_match.get('telefone_portado') or
+                                             base_match.get('telefone_portabilidade'))
+                    if telefone_portabilidade and (not isinstance(telefone_portabilidade, float) or not pd.isna(telefone_portabilidade)):
                         telefone_str = str(telefone_portabilidade).strip()
                         # Remover ponto decimal se for número float
                         if telefone_str.endswith('.0'):
@@ -838,14 +1127,14 @@ def gerar_arquivo_homologacao():
                                 if isinstance(data_conectada, str):
                                     try:
                                         record.data_venda = dt_parser.strptime(data_conectada, '%d/%m/%Y')
-                                    except:
+                                    except ValueError:
                                         try:
                                             record.data_venda = dt_parser.strptime(data_conectada, '%Y-%m-%d')
-                                        except:
+                                        except ValueError:
                                             pass
                                 elif hasattr(data_conectada, 'to_pydatetime'):
                                     record.data_venda = data_conectada.to_pydatetime()
-                            except:
+                            except (ValueError, TypeError, AttributeError):
                                 pass
                     
                     # Preencher dados de endereço da Base Analítica (sempre, mesmo se já tiver algum dado)
@@ -854,15 +1143,19 @@ def gerar_arquivo_homologacao():
                     if pd.notna(endereco) and endereco and str(endereco).strip():
                         endereco_data['endereco'] = str(endereco).strip()
                     
-                    # Numero
+                    # Numero e Complemento (normalizar)
                     numero = base_match.get('Numero') or base_match.get('Número') or base_match.get('Numero')
-                    if pd.notna(numero) and numero and str(numero).strip():
-                        endereco_data['numero'] = str(numero).strip()
-                    
-                    # Complemento
                     complemento = base_match.get('Complemento')
-                    if pd.notna(complemento) and complemento and str(complemento).strip():
-                        endereco_data['complemento'] = str(complemento).strip()
+                    complemento_str = str(complemento).strip() if pd.notna(complemento) and complemento else ''
+                    
+                    if pd.notna(numero) and numero and str(numero).strip():
+                        numero_str = str(numero).strip()
+                        # Normalizar número e extrair complementos
+                        numero_norm, compl_norm = normalizar_numero_endereco(numero_str, complemento_str)
+                        endereco_data['numero'] = numero_norm
+                        endereco_data['complemento'] = compl_norm
+                    elif complemento_str:
+                        endereco_data['complemento'] = complemento_str
                     
                     # Bairro
                     bairro = base_match.get('Bairro')
@@ -882,14 +1175,14 @@ def gerar_arquivo_homologacao():
                                 if isinstance(data, str):
                                     try:
                                         record.data_venda = dt_parser.strptime(data, '%d/%m/%Y')
-                                    except:
+                                    except ValueError:
                                         try:
                                             record.data_venda = dt_parser.strptime(data, '%Y-%m-%d')
-                                        except:
+                                        except ValueError:
                                             pass
                                 elif hasattr(data, 'to_pydatetime'):
                                     record.data_venda = data.to_pydatetime()
-                            except:
+                            except (ValueError, TypeError, AttributeError):
                                 pass
                     
                     # Buscar nu_pedido na base analítica se ainda não encontramos

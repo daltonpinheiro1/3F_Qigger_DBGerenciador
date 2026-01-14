@@ -4,7 +4,7 @@ Gerador de planilhas CSV específicas para Google Drive e Backoffice
 import csv
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional, TYPE_CHECKING
+from typing import List, Dict, Optional, TYPE_CHECKING, Any
 from datetime import datetime
 from collections import defaultdict
 import uuid
@@ -12,6 +12,7 @@ import uuid
 import pandas as pd
 
 from src.models.portabilidade import PortabilidadeRecord, PortabilidadeStatus, StatusOrdem
+from src.utils.db_fallback import buscar_dados_com_fallback
 
 if TYPE_CHECKING:
     from src.engine.qigger_decision_engine import DecisionResult
@@ -223,7 +224,7 @@ class CSVGenerator:
                                 if isinstance(value, datetime):
                                     return value.strftime("%Y-%m-%d %H:%M:%S")
                                 return str(value)
-                            except:
+                            except (ValueError, TypeError, AttributeError):
                                 return default
                         
                         def safe_bool(value, default='Não'):
@@ -238,7 +239,7 @@ class CSVGenerator:
                                 return default
                             try:
                                 return value.value if hasattr(value, 'value') else str(value)
-                            except:
+                            except (ValueError, TypeError, AttributeError):
                                 return default
                         
                         # Gerar link de rastreio se não existir
@@ -508,7 +509,7 @@ class CSVGenerator:
                         if isinstance(value, datetime):
                             return value.strftime("%d/%m/%Y")
                         return str(value)
-                    except:
+                    except (ValueError, TypeError, AttributeError):
                         return default
                 
                 def safe_enum(value, default=''):
@@ -516,7 +517,7 @@ class CSVGenerator:
                         return default
                     try:
                         return value.value if hasattr(value, 'value') else str(value)
-                    except:
+                    except (ValueError, TypeError, AttributeError):
                         return default
                 
                 def safe_bool(value, default=''):
@@ -728,7 +729,8 @@ class CSVGenerator:
         records: List[PortabilidadeRecord],
         results_map: Dict[str, List['DecisionResult']],
         output_path: Path,
-        base_analitica_loader=None
+        base_analitica_loader=None,
+        db_manager=None
     ) -> bool:
         """
         Gera planilha de Reabertura para Backoffice
@@ -883,6 +885,48 @@ class CSVGenerator:
             def safe_str(value, default=''):
                 return str(value) if value is not None else default
             
+            # Função auxiliar para buscar dados do banco com fallback (usando utilitário centralizado)
+            def buscar_dados_banco(cpf_val: str, codigo_externo_val: str) -> Dict[str, Any]:
+                """
+                Busca dados do banco com fallback usando função utilitária centralizada.
+                
+                Returns:
+                    Dict com: plano, preco, numero_ordem, telefone_portado, numero_linha
+                """
+                # Priorizar busca por codigo_externo, depois por cpf
+                resultado = {}
+                
+                if codigo_externo_val:
+                    resultado = buscar_dados_com_fallback(
+                        db_manager=db_manager,
+                        identificador=codigo_externo_val,
+                        tipo_identificador='codigo_externo',
+                        campos_desejados=['plano', 'preco', 'numero_ordem', 'telefone_portado', 'numero_linha']
+                    )
+                
+                # Se não encontrou tudo e temos CPF, tentar por CPF
+                if cpf_val and (not resultado.get('plano') or not resultado.get('numero_ordem')):
+                    resultado_cpf = buscar_dados_com_fallback(
+                        db_manager=db_manager,
+                        identificador=cpf_val,
+                        tipo_identificador='cpf',
+                        campos_desejados=['plano', 'preco', 'numero_ordem', 'telefone_portado', 'numero_linha']
+                    )
+                    
+                    # Preencher campos faltantes do resultado por CPF
+                    for campo in ['plano', 'preco', 'numero_ordem', 'telefone_portado', 'numero_linha']:
+                        if not resultado.get(campo) and resultado_cpf.get(campo):
+                            resultado[campo] = resultado_cpf[campo]
+                
+                # Garantir que todos os campos existam
+                resultado.setdefault('plano', '')
+                resultado.setdefault('preco', '')
+                resultado.setdefault('numero_ordem', '')
+                resultado.setdefault('telefone_portado', '')
+                resultado.setdefault('numero_linha', '')
+                
+                return resultado
+            
             # Processar cada grupo de CPF
             for cpf, registros_cpf in grupos_cpf.items():
                 # Limitar a 5 registros por CPF
@@ -894,9 +938,12 @@ class CSVGenerator:
                 numeros_acesso_3_5 = []
                 
                 for r in registros_cpf:
-                    # Buscar dados da Base Analítica para este registro específico
-                    telefone_portabilidade = ''
-                    numero_linha = ''
+                    # Buscar dados do banco com fallback de múltiplas tabelas
+                    dados_banco = buscar_dados_banco(cpf, r.codigo_externo)
+                    
+                    # Buscar dados da Base Analítica para este registro específico (fallback adicional)
+                    telefone_portabilidade = dados_banco['telefone_portado'] if dados_banco['telefone_portado'] else ''
+                    numero_linha = dados_banco['numero_linha'] if dados_banco['numero_linha'] else ''
                     
                     if base_analitica_loader and hasattr(base_analitica_loader, 'is_loaded') and base_analitica_loader.is_loaded:
                         # Tentar buscar por código externo primeiro
@@ -911,40 +958,42 @@ class CSVGenerator:
                                     base_match = base_match_cpf
                         
                         if base_match is not None:
-                            # Buscar "Telefone Portabilidade" da Base Analítica
-                            if isinstance(base_match, pd.Series):
-                                telefone_port_val = base_match.get('Telefone Portabilidade', '')
-                                if pd.notna(telefone_port_val) and str(telefone_port_val).strip() and str(telefone_port_val).strip() != '-':
-                                    telefone_portabilidade = str(telefone_port_val).strip()
-                                
-                                # Buscar "Numero linha" (com variações do nome da coluna)
-                                for col_name in ['Numero linha', 'numero linha', 'Numero Linha', 'Número Linha', 'Numero_linha', 'Número_linha']:
-                                    if col_name in base_match.index:
-                                        numero_linha_val = base_match[col_name]
-                                        if pd.notna(numero_linha_val):
-                                            numero_linha_str = str(numero_linha_val).strip()
-                                            # Remover .0 se for float
-                                            if numero_linha_str.endswith('.0'):
-                                                numero_linha_str = numero_linha_str[:-2]
-                                            if numero_linha_str:
-                                                numero_linha = numero_linha_str
-                                                break
-                            elif isinstance(base_match, dict):
-                                telefone_port_val = base_match.get('Telefone Portabilidade', '')
-                                if telefone_port_val and str(telefone_port_val).strip() != '-':
-                                    telefone_portabilidade = str(telefone_port_val).strip()
-                                
-                                # Buscar numero linha
-                                for col_name in ['Numero linha', 'numero linha', 'Numero Linha', 'Número Linha', 'Numero_linha', 'Número_linha']:
-                                    if col_name in base_match:
-                                        numero_linha_val = base_match[col_name]
-                                        if numero_linha_val:
-                                            numero_linha_str = str(numero_linha_val).strip()
-                                            if numero_linha_str.endswith('.0'):
-                                                numero_linha_str = numero_linha_str[:-2]
-                                            if numero_linha_str:
-                                                numero_linha = numero_linha_str
-                                                break
+                            # Buscar "Telefone Portabilidade" da Base Analítica (se não foi encontrado no banco)
+                            if not telefone_portabilidade:
+                                if isinstance(base_match, pd.Series):
+                                    telefone_port_val = base_match.get('Telefone Portabilidade', '')
+                                    if pd.notna(telefone_port_val) and str(telefone_port_val).strip() and str(telefone_port_val).strip() != '-':
+                                        telefone_portabilidade = str(telefone_port_val).strip()
+                                elif isinstance(base_match, dict):
+                                    telefone_port_val = base_match.get('Telefone Portabilidade', '')
+                                    if telefone_port_val and str(telefone_port_val).strip() != '-':
+                                        telefone_portabilidade = str(telefone_port_val).strip()
+                            
+                            # Buscar "Numero linha" da Base Analítica (se não foi encontrado no banco)
+                            if not numero_linha:
+                                if isinstance(base_match, pd.Series):
+                                    for col_name in ['Numero linha', 'numero linha', 'Numero Linha', 'Número Linha', 'Numero_linha', 'Número_linha']:
+                                        if col_name in base_match.index:
+                                            numero_linha_val = base_match[col_name]
+                                            if pd.notna(numero_linha_val):
+                                                numero_linha_str = str(numero_linha_val).strip()
+                                                # Remover .0 se for float
+                                                if numero_linha_str.endswith('.0'):
+                                                    numero_linha_str = numero_linha_str[:-2]
+                                                if numero_linha_str:
+                                                    numero_linha = numero_linha_str
+                                                    break
+                                elif isinstance(base_match, dict):
+                                    for col_name in ['Numero linha', 'numero linha', 'Numero Linha', 'Número Linha', 'Numero_linha', 'Número_linha']:
+                                        if col_name in base_match:
+                                            numero_linha_val = base_match[col_name]
+                                            if numero_linha_val:
+                                                numero_linha_str = str(numero_linha_val).strip()
+                                                if numero_linha_str.endswith('.0'):
+                                                    numero_linha_str = numero_linha_str[:-2]
+                                                if numero_linha_str:
+                                                    numero_linha = numero_linha_str
+                                                    break
                     
                     # Verificar se é portabilidade
                     is_portabilidade = False
@@ -953,29 +1002,23 @@ class CSVGenerator:
                     elif r.data_portabilidade:
                         is_portabilidade = True
                     
-                    # Obter valores - PRIORIDADE: Base Analítica > Record
-                    # Número portado: usar "Telefone Portabilidade" da Base Analítica se disponível
-                    numero_portado = telefone_portabilidade if telefone_portabilidade else safe_str(r.numero_acesso)
+                    # Limpar telefone_portado e numero_linha (remover caracteres não numéricos)
+                    if telefone_portabilidade:
+                        telefone_portabilidade = ''.join(filter(str.isdigit, telefone_portabilidade))
+                    if numero_linha:
+                        numero_linha = ''.join(filter(str.isdigit, numero_linha))
                     
-                    # Número provisório: usar "Numero linha" da Base Analítica se disponível
-                    numero_provisorio = numero_linha if numero_linha else (safe_str(r.numero_temporario) if r.numero_temporario else '')
-                    
-                    # Número de acesso 1: número portado (se portabilidade) ou número provisório (se não houver portado)
+                    # Lógica de número de acesso conforme regras:
+                    # - Número de acesso 1: telefone_portado quando for portabilidade, numero_linha quando for nova linha
+                    # - Número de acesso 2: numero_linha quando for portabilidade, numero_linha quando for nova linha (repete)
                     if is_portabilidade:
-                        # Se é portabilidade, número portado vem da Base Analítica ("Telefone Portabilidade") ou record
-                        # Se não houver número portado, usar número provisório
-                        numero_acesso_1 = numero_portado if numero_portado else numero_provisorio
+                        # Portabilidade: acesso 1 = telefone_portado, acesso 2 = numero_linha
+                        numero_acesso_1 = telefone_portabilidade if telefone_portabilidade else (numero_linha if numero_linha else safe_str(r.numero_acesso))
+                        numero_acesso_2 = numero_linha if numero_linha else numero_acesso_1
                     else:
-                        # Se não é portabilidade, usar número provisório se existir, senão numero_acesso
-                        numero_acesso_1 = numero_provisorio if numero_provisorio else safe_str(r.numero_acesso)
-                    
-                    # Número de acesso 2: se for portabilidade, inserir número provisório ("Numero linha")
-                    # Se não tiver número provisório, estará idêntico nas 2 colunas
-                    if is_portabilidade and numero_provisorio:
-                        numero_acesso_2 = numero_provisorio
-                    else:
-                        # Se não for portabilidade ou não tiver provisório, usar o mesmo de acesso 1
-                        numero_acesso_2 = numero_acesso_1
+                        # Nova linha: acesso 1 = numero_linha, acesso 2 = numero_linha (repete)
+                        numero_acesso_1 = numero_linha if numero_linha else safe_str(r.numero_acesso)
+                        numero_acesso_2 = numero_linha if numero_linha else numero_acesso_1
                     
                     numeros_acesso_1.append(numero_acesso_1)
                     numeros_acesso_2.append(numero_acesso_2)
@@ -1000,15 +1043,22 @@ class CSVGenerator:
                 primeiro_numero_ordem_raw = safe_str(primeiro.numero_ordem) if primeiro else ''
                 primeiro_codigo_externo = safe_str(primeiro.codigo_externo) if primeiro else ''
                 
+                # Buscar dados do banco com fallback (incluindo numero_ordem)
+                dados_banco_cpf = buscar_dados_banco(cpf, primeiro_codigo_externo)
+                
                 # Validar se numero_ordem está no formato correto (começa com "1-")
                 primeiro_numero_ordem = ''
+                # Prioridade: dados do banco > primeiro registro
+                if dados_banco_cpf['numero_ordem']:
+                    primeiro_numero_ordem_raw = dados_banco_cpf['numero_ordem']
+                
                 if primeiro_numero_ordem_raw:
                     # Verificar se está no formato "1-XXXXXXXXXXXXX"
                     if primeiro_numero_ordem_raw.startswith('1-') and len(primeiro_numero_ordem_raw) > 2:
                         primeiro_numero_ordem = primeiro_numero_ordem_raw
                     # Se não estiver no formato correto e for igual ao código externo (id_isize), não usar
                     elif primeiro_numero_ordem_raw == primeiro_codigo_externo:
-                        # Não usar id_isize, deixar vazio (será usado fallback da Base Analítica)
+                        # Não usar id_isize, deixar vazio (será usado fallback)
                         primeiro_numero_ordem = ''
                     # Se não estiver no formato mas não for id_isize, usar apenas se começar com "1-"
                     elif primeiro_numero_ordem_raw.startswith('1-'):
@@ -1067,15 +1117,28 @@ class CSVGenerator:
                     ''   # Código externo 5 - não preencher
                 ]
                 
-                # Pegar Plano e Preço da Base Analítica
+                # Pegar Plano e Preço com fallback: banco > base analítica > registro
                 primeiro = registros_cpf[0]
                 plano = ''  # Nome completo do plano (ex: "TIM CONTROLE A PLUS - 31,99")
-                preco_raw = safe_str(primeiro.preco_ordem, '').replace('R$', '').replace(',', '.').strip()
+                preco_raw = ''
+                
+                # Prioridade 1: Buscar do banco (dados_banco_cpf já foi buscado acima)
+                if dados_banco_cpf['plano']:
+                    plano = dados_banco_cpf['plano']
+                if dados_banco_cpf['preco']:
+                    preco_raw = dados_banco_cpf['preco']
+                
+                # Prioridade 2: Se não encontrou no banco, buscar do registro
+                if not plano and primeiro:
+                    plano = ''
+                if not preco_raw:
+                    preco_raw = safe_str(primeiro.preco_ordem, '').replace('R$', '').replace(',', '.').strip()
+                
                 # Limpar preço removendo prefixos (SP, R$, etc.)
                 preco = extrair_valor_plano(preco_raw) if preco_raw else ''
                 
-                # Buscar Plano na Base Analítica
-                if base_analitica_loader and hasattr(base_analitica_loader, 'is_loaded') and base_analitica_loader.is_loaded:
+                # Prioridade 3: Buscar Plano na Base Analítica (se ainda não encontrou)
+                if not plano and base_analitica_loader and hasattr(base_analitica_loader, 'is_loaded') and base_analitica_loader.is_loaded:
                     # Tentar buscar por código externo primeiro
                     base_match = base_analitica_loader.find_by_codigo_externo(primeiro.codigo_externo)
                     if base_match is None and cpf:
@@ -1094,10 +1157,11 @@ class CSVGenerator:
                                         # Coluna Plano: manter o texto completo
                                         plano = plano_texto.strip()
                                         
-                                        # Coluna Preço: extrair apenas o valor final
-                                        preco_extraido = extrair_valor_plano(plano_texto)
-                                        if preco_extraido:
-                                            preco = preco_extraido
+                                        # Coluna Preço: extrair apenas o valor final (se ainda não tem preço)
+                                        if not preco:
+                                            preco_extraido = extrair_valor_plano(plano_texto)
+                                            if preco_extraido:
+                                                preco = preco_extraido
                                         break
                 
                 # Obter regra aplicada para este CPF

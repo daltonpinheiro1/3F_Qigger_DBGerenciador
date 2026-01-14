@@ -241,7 +241,7 @@ class ReguaComunicacaoDinamica:
                 try:
                     self.df_portabilidade = pd.read_csv(file_path, encoding=encoding)
                     break
-                except:
+                except (UnicodeDecodeError, LookupError, pd.errors.EmptyDataError, FileNotFoundError):
                     continue
             
             if self.df_portabilidade is None:
@@ -678,16 +678,20 @@ class ReguaComunicacaoDinamica:
             return None
         
         formats = [
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d",
-            "%d/%m/%Y %H:%M:%S",
-            "%d/%m/%Y",
+            # Formatos brasileiros (mais comuns primeiro)
+            "%d/%m/%Y %H:%M:%S",      # 17/07/2025 08:00:00
+            "%d/%m/%Y %H:%M",         # 17/07/2025 08:00
+            "%d/%m/%Y",               # 17/07/2025
+            # Formatos ISO
+            "%Y-%m-%d %H:%M:%S",      # 2025-07-17 08:00:00
+            "%Y-%m-%d %H:%M",         # 2025-07-17 08:00
+            "%Y-%m-%d",               # 2025-07-17
         ]
         
         for fmt in formats:
             try:
                 return datetime.strptime(cleaned, fmt)
-            except:
+            except (ValueError, TypeError):
                 continue
         
         return None

@@ -267,6 +267,64 @@ class DatabaseManager:
                 )
             """)
             
+            # Tabela de Cache/Fallback de Dados Consolidados
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS dados_fallback_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    
+                    -- Chaves de identificação (múltiplas para busca rápida)
+                    codigo_externo TEXT,
+                    proposta_isize TEXT,
+                    cpf TEXT,
+                    numero_ordem TEXT,
+                    
+                    -- Dados consolidados (resultados do fallback)
+                    plano TEXT,                      -- Nome completo do plano
+                    preco TEXT,                      -- Preço do plano/ordem
+                    numero_ordem_consolidado TEXT,   -- Numero da ordem consolidado (formato "1-XXXXXXXXXXXXX")
+                    telefone_portado TEXT,           -- Telefone para portabilidade
+                    numero_linha TEXT,               -- Número de linha provisório
+                    cliente_nome TEXT,               -- Nome do cliente
+                    
+                    -- Origem dos dados (qual tabela forneceu cada campo)
+                    origem_plano TEXT,               -- 'base_coverte_prop', 'base_unificada', etc.
+                    origem_preco TEXT,
+                    origem_numero_ordem TEXT,
+                    origem_telefone_portado TEXT,
+                    origem_numero_linha TEXT,
+                    
+                    -- Controle de cache
+                    hash_dados TEXT,                 -- Hash para detectar mudanças
+                    data_ultima_busca TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    data_ultima_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    -- Metadados
+                    total_buscas INTEGER DEFAULT 1,  -- Contador de quantas vezes foi consultado
+                    is_valido INTEGER DEFAULT 1,     -- Se o cache ainda é válido (1=válido, 0=inválido)
+                    
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Criar índices para busca rápida no cache
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_fallback_codigo_externo 
+                ON dados_fallback_cache(codigo_externo, is_valido)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_fallback_proposta_isize 
+                ON dados_fallback_cache(proposta_isize, is_valido)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_fallback_cpf 
+                ON dados_fallback_cache(cpf, is_valido)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_fallback_numero_ordem 
+                ON dados_fallback_cache(numero_ordem, is_valido)
+            """)
+            
             conn.commit()
             logger.info("Banco de dados inicializado com sucesso")
     
@@ -640,28 +698,71 @@ class DatabaseManager:
     
     @contextmanager
     def _get_connection(self):
-        """Context manager para conexões com o banco de dados"""
+        """
+        Context manager robusto para conexões com o banco de dados.
+        
+        - Timeout de 30 segundos para evitar locks infinitos
+        - Rollback automático em caso de erro
+        - Fechamento garantido da conexão
+        - Habilita foreign keys para integridade referencial
+        """
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn = sqlite3.connect(
+                self.db_path, 
+                timeout=30.0,
+                isolation_level='DEFERRED',  # Melhor para concorrência
+                check_same_thread=False  # Permite uso em threads
+            )
             conn.row_factory = sqlite3.Row
             # Habilitar foreign keys
             conn.execute("PRAGMA foreign_keys = ON")
             yield conn
             conn.commit()
+        except sqlite3.OperationalError as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass  # Ignorar erros de rollback
+            error_msg = str(e).lower()
+            if 'database is locked' in error_msg:
+                logger.error(f"Banco de dados bloqueado: {self.db_path}. Tentando novamente pode resolver.")
+            elif 'disk i/o error' in error_msg:
+                logger.error(f"Erro de I/O no banco de dados: {self.db_path}. Verifique permissões e espaço em disco.")
+            else:
+                logger.error(f"Erro operacional SQLite: {e}", exc_info=True)
+            raise
+        except sqlite3.IntegrityError as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            logger.error(f"Erro de integridade SQLite: {e}")
+            raise
         except sqlite3.Error as e:
             if conn:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             logger.error(f"Erro SQLite no banco de dados {self.db_path}: {e}", exc_info=True)
             raise
         except Exception as e:
             if conn:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             logger.error(f"Erro inesperado no banco de dados {self.db_path}: {e}", exc_info=True)
             raise
         finally:
             if conn:
-                conn.close()
+                try:
+                    conn.close()
+                except Exception:
+                    pass  # Garantir que não falha no finally
     
     def insert_record(self, record: PortabilidadeRecord) -> int:
         """
@@ -940,6 +1041,16 @@ class DatabaseManager:
         Returns:
             Dicionário com os dados do registro ou None
         """
+        # Validação de entrada
+        if not cpf or not numero_acesso or not numero_ordem:
+            logger.warning("get_record chamado com parâmetros vazios")
+            return None
+        
+        # Sanitização básica
+        cpf = str(cpf).strip()
+        numero_acesso = str(numero_acesso).strip()
+        numero_ordem = str(numero_ordem).strip()
+        
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -1254,8 +1365,23 @@ class DatabaseManager:
                 """)
                 tables = [row[0] for row in cursor.fetchall()]
                 
+                # Lista de tabelas permitidas (whitelist para segurança)
+                allowed_tables = {
+                    'portabilidade_records', 'triggers_rules', 'decision_history',
+                    'rules_log', 'unmapped_records', 'templates_wpp',
+                    'tipo_comunicacao_template', 'relatorio_objetos', 
+                    'dados_fallback_cache', 'schema_version', 'base_coverte_prop',
+                    'base_unificada', 'tim_unificado'
+                }
+                
                 for table in tables:
-                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    # Sanitizar nome da tabela (whitelist)
+                    if table not in allowed_tables:
+                        logger.warning(f"Tabela {table} ignorada por não estar na whitelist")
+                        continue
+                    
+                    # Query segura com nome de tabela validado
+                    cursor.execute(f"SELECT COUNT(*) FROM [{table}]")
                     count = cursor.fetchone()[0]
                     size_info['tables'][table] = count
                     size_info['total_rows'] += count
@@ -1379,7 +1505,11 @@ class DatabaseManager:
             
             for index_name in indexes:
                 try:
-                    cursor.execute(f"REINDEX {index_name}")
+                    # Sanitizar nome do índice (apenas alfanumérico e underscore)
+                    if not all(c.isalnum() or c == '_' for c in index_name):
+                        logger.warning(f"Nome de índice inválido ignorado: {index_name}")
+                        continue
+                    cursor.execute(f"REINDEX [{index_name}]")
                     logger.debug(f"Índice {index_name} reconstruído")
                 except Exception as e:
                     logger.warning(f"Erro ao reconstruir índice {index_name}: {e}")
@@ -1592,6 +1722,8 @@ class DatabaseManager:
     def sync_relatorio_objetos(self, objects_loader) -> Dict[str, int]:
         """
         Sincroniza dados do ObjectsLoader para o banco de dados com versionamento
+        - Detecta automaticamente todas as colunas do Excel
+        - Migra a estrutura do banco para incluir todas as colunas CSI
         - Se não houver mudanças: apenas atualiza updated_at
         - Se houver mudanças: cria nova versão (preserva histórico)
         
@@ -1607,11 +1739,36 @@ class DatabaseManager:
         
         stats = {'processados': 0, 'inseridos': 0, 'novas_versoes': 0, 'sem_mudancas': 0, 'erros': 0}
         
+        # Migrar estrutura do banco para incluir todas as colunas do Excel
+        try:
+            if objects_loader.file_path:
+                from src.database.migrate_relatorio_objetos_completo import migrar_tabela_relatorio_objetos
+                logger.info("Migrando estrutura do banco para incluir todas as colunas CSI...")
+                migrar_tabela_relatorio_objetos(self.db_path, objects_loader.file_path)
+                logger.info("✅ Migração concluída")
+        except Exception as e:
+            logger.warning(f"⚠️ Erro durante migração (continuando): {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+        
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
+            # Obter todas as colunas da tabela dinamicamente
+            cursor.execute("PRAGMA table_info(relatorio_objetos)")
+            colunas_banco = [row[1] for row in cursor.fetchall()]
+            # Remover colunas de controle
+            colunas_dados = [c for c in colunas_banco if c not in ('id', 'registro_id_base', 'versao', 'created_at', 'updated_at')]
+            
+            logger.debug(f"Colunas disponíveis no banco: {len(colunas_dados)}")
+            
             for obj_record in objects_loader._records:
                 try:
+                    # Validar campos obrigatórios
+                    if not obj_record.nu_pedido or not obj_record.codigo_externo:
+                        logger.warning(f"Registro ignorado: nu_pedido ou codigo_externo vazio")
+                        continue
+                    
                     # Converter datas para string ISO
                     data_criacao = obj_record.data_criacao_pedido.isoformat() if obj_record.data_criacao_pedido else None
                     data_insercao = obj_record.data_insercao.isoformat() if obj_record.data_insercao else None
@@ -1621,14 +1778,64 @@ class DatabaseManager:
                     # Criar registro_id_base único
                     registro_id_base = f"{obj_record.nu_pedido}|{obj_record.codigo_externo}"
                     
+                    # Converter ObjectRecord para dicionário (inclui colunas extras)
+                    obj_dict = obj_record.to_dict()
+                    
+                    # Preparar dados para inserção/atualização
+                    # Mapear campos principais para nomes SQL
+                    dados_mapeados = {
+                        'nu_pedido': obj_record.nu_pedido,
+                        'codigo_externo': obj_record.codigo_externo,
+                        'id_erp': obj_record.id_erp,
+                        'rastreio': obj_record.rastreio,
+                        'destinatario': obj_record.destinatario,
+                        'documento': obj_record.documento,
+                        'telefone': obj_record.telefone,
+                        'cidade': obj_record.cidade,
+                        'uf': obj_record.uf,
+                        'cep': obj_record.cep,
+                        'data_criacao_pedido': data_criacao,
+                        'data_insercao': data_insercao,
+                        'status': obj_record.status,
+                        'transportadora': obj_record.transportadora,
+                        'previsao_entrega': previsao,
+                        'data_entrega': data_entrega,
+                        'ultima_ocorrencia': obj_record.ultima_ocorrencia,
+                        'ultima_ocorrencia_cronologica': obj_record.ultima_ocorrencia_cronologica,
+                        'local_ultima_ocorrencia': obj_record.local_ultima_ocorrencia,
+                        'cidade_ultima_ocorrencia': obj_record.cidade_ultima_ocorrencia,
+                        'estado_ultima_ocorrencia': obj_record.estado_ultima_ocorrencia,
+                        'iccid': obj_record.iccid,
+                    }
+                    
+                    # Adicionar colunas extras se existirem (verificar com hasattr e getattr para segurança)
+                    colunas_extras = getattr(obj_record, 'colunas_extras', None)
+                    if colunas_extras and isinstance(colunas_extras, dict) and len(colunas_extras) > 0:
+                        # Adicionar colunas extras ao mapeamento
+                        dados_mapeados.update(colunas_extras)
+                        
+                        # Extrair campos de endereço de colunas_extras se existirem
+                        # (podem estar com nomes diferentes: endereco, logradouro, rua, etc.)
+                        campos_endereco_map = {
+                            'endereco': ['endereco', 'logradouro', 'rua', 'local_entrega', 'local_entrega_'],
+                            'numero': ['numero', 'num', 'numero_endereco'],
+                            'complemento': ['complemento', 'complemento_endereco'],
+                            'bairro': ['bairro', 'bairro_endereco']
+                        }
+                        
+                        for campo_sql, variações in campos_endereco_map.items():
+                            # Se o campo já não está mapeado explicitamente
+                            if campo_sql not in dados_mapeados or not dados_mapeados.get(campo_sql):
+                                # Buscar nas colunas extras
+                                for var in variações:
+                                    valor = colunas_extras.get(var)
+                                    if valor and str(valor).strip():
+                                        dados_mapeados[campo_sql] = str(valor).strip()
+                                        break
+                    
                     # Buscar versão mais recente deste registro
-                    cursor.execute("""
-                        SELECT id, versao, id_erp, rastreio, destinatario, documento, telefone,
-                               cidade, uf, cep, data_criacao_pedido, data_insercao, status,
-                               transportadora, previsao_entrega, data_entrega, ultima_ocorrencia,
-                               ultima_ocorrencia_cronologica, local_ultima_ocorrencia,
-                               cidade_ultima_ocorrencia, estado_ultima_ocorrencia, iccid
-                        FROM relatorio_objetos 
+                    cursor.execute(f"""
+                        SELECT * FROM relatorio_objetos 
                         WHERE registro_id_base = ?
                         ORDER BY versao DESC
                         LIMIT 1
@@ -1637,57 +1844,51 @@ class DatabaseManager:
                     
                     if existing:
                         # Verificar se há mudanças significativas
-                        existing_dict = dict(zip([col[0] for col in cursor.description], existing))
+                        colunas_existing = [desc[0] for desc in cursor.description]
+                        existing_dict = dict(zip(colunas_existing, existing))
                         
                         # Comparar campos críticos que podem mudar
-                        campos_criticos = {
-                            'id_erp': obj_record.id_erp,
-                            'rastreio': obj_record.rastreio,
-                            'iccid': obj_record.iccid,
-                            'status': obj_record.status,
-                            'data_entrega': data_entrega,
-                            'ultima_ocorrencia': obj_record.ultima_ocorrencia,
-                            'local_ultima_ocorrencia': obj_record.local_ultima_ocorrencia,
-                            'cidade_ultima_ocorrencia': obj_record.cidade_ultima_ocorrencia,
-                            'estado_ultima_ocorrencia': obj_record.estado_ultima_ocorrencia,
-                        }
+                        campos_criticos = [
+                            'id_erp', 'rastreio', 'iccid', 'status', 'data_entrega',
+                            'ultima_ocorrencia', 'ultima_ocorrencia_cronologica',
+                            'local_ultima_ocorrencia', 'cidade_ultima_ocorrencia',
+                            'estado_ultima_ocorrencia'
+                        ]
                         
                         # Normalizar valores None para comparação
                         def normalize_value(val):
+                            if val is None:
+                                return ''
+                            # Valores já são convertidos para string antes (datas já em ISO)
                             return str(val).strip() if val else ''
                         
                         mudancas = False
-                        for campo, novo_valor in campos_criticos.items():
-                            valor_existente = normalize_value(existing_dict.get(campo))
-                            valor_novo = normalize_value(novo_valor)
-                            if valor_existente != valor_novo:
-                                mudancas = True
-                                break
+                        for campo in campos_criticos:
+                            if campo in dados_mapeados and campo in existing_dict:
+                                valor_existente = normalize_value(existing_dict.get(campo))
+                                valor_novo = normalize_value(dados_mapeados.get(campo))
+                                if valor_existente != valor_novo:
+                                    mudancas = True
+                                    break
                         
                         if mudancas:
                             # Criar nova versão (preservar histórico)
                             nova_versao = existing_dict['versao'] + 1
-                            cursor.execute("""
-                                INSERT INTO relatorio_objetos (
-                                    registro_id_base, versao, nu_pedido, codigo_externo, id_erp, rastreio,
-                                    destinatario, documento, telefone, cidade, uf, cep,
-                                    data_criacao_pedido, data_insercao, status, transportadora,
-                                    previsao_entrega, data_entrega, ultima_ocorrencia,
-                                    ultima_ocorrencia_cronologica, local_ultima_ocorrencia,
-                                    cidade_ultima_ocorrencia, estado_ultima_ocorrencia, iccid
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (
-                                registro_id_base, nova_versao, obj_record.nu_pedido, obj_record.codigo_externo,
-                                obj_record.id_erp, obj_record.rastreio, obj_record.destinatario, obj_record.documento,
-                                obj_record.telefone, obj_record.cidade, obj_record.uf, obj_record.cep,
-                                data_criacao, data_insercao, obj_record.status, obj_record.transportadora,
-                                previsao, data_entrega, obj_record.ultima_ocorrencia,
-                                obj_record.ultima_ocorrencia_cronologica,
-                                obj_record.local_ultima_ocorrencia,
-                                obj_record.cidade_ultima_ocorrencia,
-                                obj_record.estado_ultima_ocorrencia,
-                                obj_record.iccid
-                            ))
+                            
+                            # Construir INSERT dinâmico com todas as colunas
+                            colunas_insert = ['registro_id_base', 'versao'] + colunas_dados
+                            placeholders = ', '.join(['?'] * len(colunas_insert))
+                            
+                            valores_insert = [registro_id_base, nova_versao]
+                            for col in colunas_dados:
+                                valores_insert.append(dados_mapeados.get(col))
+                            
+                            # Executar INSERT dinâmico
+                            query = f"""
+                                INSERT INTO relatorio_objetos ({', '.join(colunas_insert)})
+                                VALUES ({placeholders})
+                            """
+                            cursor.execute(query, valores_insert)
                             stats['novas_versoes'] += 1
                         else:
                             # Sem mudanças: apenas atualizar updated_at
@@ -1699,33 +1900,38 @@ class DatabaseManager:
                             stats['sem_mudancas'] += 1
                     else:
                         # Inserir novo registro (versão 1)
-                        cursor.execute("""
-                            INSERT INTO relatorio_objetos (
-                                registro_id_base, versao, nu_pedido, codigo_externo, id_erp, rastreio,
-                                destinatario, documento, telefone, cidade, uf, cep,
-                                data_criacao_pedido, data_insercao, status, transportadora,
-                                previsao_entrega, data_entrega, ultima_ocorrencia,
-                                ultima_ocorrencia_cronologica, local_ultima_ocorrencia,
-                                cidade_ultima_ocorrencia, estado_ultima_ocorrencia, iccid
-                            ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            registro_id_base, obj_record.nu_pedido, obj_record.codigo_externo, obj_record.id_erp,
-                            obj_record.rastreio, obj_record.destinatario, obj_record.documento,
-                            obj_record.telefone, obj_record.cidade, obj_record.uf, obj_record.cep,
-                            data_criacao, data_insercao, obj_record.status, obj_record.transportadora,
-                            previsao, data_entrega, obj_record.ultima_ocorrencia,
-                            obj_record.ultima_ocorrencia_cronologica,
-                            obj_record.local_ultima_ocorrencia,
-                            obj_record.cidade_ultima_ocorrencia,
-                            obj_record.estado_ultima_ocorrencia,
-                            obj_record.iccid
-                        ))
+                        # Construir INSERT dinâmico com todas as colunas
+                        colunas_insert = ['registro_id_base', 'versao'] + colunas_dados
+                        placeholders = ', '.join(['?'] * len(colunas_insert))
+                        
+                        valores_insert = [registro_id_base, 1]  # versao inicial = 1
+                        for col in colunas_dados:
+                            valores_insert.append(dados_mapeados.get(col))
+                        
+                        # Executar INSERT dinâmico
+                        query = f"""
+                            INSERT INTO relatorio_objetos ({', '.join(colunas_insert)})
+                            VALUES ({placeholders})
+                        """
+                        cursor.execute(query, valores_insert)
                         stats['inseridos'] += 1
                     
                     stats['processados'] += 1
                     
                 except Exception as e:
-                    logger.error(f"Erro ao sincronizar registro do relatório de objetos: {e}")
+                    # Log detalhado do erro para debug
+                    try:
+                        logger.error(
+                            f"Erro ao sincronizar registro do relatório de objetos: {e}\n"
+                            f"  registro_id_base: {registro_id_base}\n"
+                            f"  nu_pedido: {obj_record.nu_pedido}\n"
+                            f"  codigo_externo: {obj_record.codigo_externo}\n"
+                            f"  Valores na tupla: registro_id_base={registro_id_base}, versao=1, "
+                            f"nu_pedido={obj_record.nu_pedido}, codigo_externo={obj_record.codigo_externo}, "
+                            f"... (total esperado: 24)"
+                        )
+                    except (NameError, AttributeError, TypeError):
+                        logger.error(f"Erro ao sincronizar registro do relatório de objetos: {e}")
                     stats['erros'] += 1
             
             conn.commit()

@@ -17,10 +17,17 @@ class CSVParser:
     """Parser para arquivos CSV de portabilidade"""
     
     DATE_FORMATS = [
-        "%d/%m/%Y %H:%M:%S",
-        "%d/%m/%Y",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d"
+        # Formatos brasileiros (mais comuns primeiro)
+        "%d/%m/%Y %H:%M:%S",      # 17/07/2025 08:00:00
+        "%d/%m/%Y %H:%M",         # 17/07/2025 08:00
+        "%d/%m/%Y",               # 17/07/2025
+        # Formatos ISO
+        "%Y-%m-%d %H:%M:%S",      # 2025-07-17 08:00:00
+        "%Y-%m-%d %H:%M",         # 2025-07-17 08:00
+        "%Y-%m-%d",               # 2025-07-17
+        # Formatos alternativos com hora
+        "%d/%m/%Y %H:%M:%S.%f",   # 17/07/2025 08:00:00.123456 (com microsegundos)
+        "%Y-%m-%d %H:%M:%S.%f",   # 2025-07-17 08:00:00.123456 (com microsegundos)
     ]
     
     @staticmethod

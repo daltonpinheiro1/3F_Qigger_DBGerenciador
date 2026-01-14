@@ -292,18 +292,50 @@ class UnifiedDatabaseManager:
     
     @contextmanager
     def _get_connection(self):
-        """Context manager para conexões com o banco"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        """
+        Context manager robusto para conexões com o banco.
+        
+        - Timeout de 30 segundos para evitar locks infinitos
+        - Rollback automático em caso de erro
+        - Fechamento garantido da conexão
+        """
+        conn = None
         try:
+            conn = sqlite3.connect(
+                self.db_path,
+                timeout=30.0,
+                isolation_level='DEFERRED',
+                check_same_thread=False
+            )
+            conn.row_factory = sqlite3.Row
             yield conn
             conn.commit()
+        except sqlite3.OperationalError as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            error_msg = str(e).lower()
+            if 'database is locked' in error_msg:
+                logger.error(f"Banco de dados bloqueado: {self.db_path}")
+            else:
+                logger.error(f"Erro operacional SQLite: {e}")
+            raise
         except Exception as e:
-            conn.rollback()
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             logger.error(f"Erro na transação: {e}")
             raise
         finally:
-            conn.close()
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
     
     def _calculate_hash(self, data: Dict[str, Any]) -> str:
         """
