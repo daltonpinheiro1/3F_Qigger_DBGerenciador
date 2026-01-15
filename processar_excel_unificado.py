@@ -904,18 +904,32 @@ def processar_excel_unificado(
         stats['total_linhas'] = len(df)
         logger.info(f"Total de linhas no Excel: {stats['total_linhas']}")
         
-        # Detectar tipo de arquivo
-        is_coverte_prop = 'CRIVO VENDAS' in df.columns or 'Data venda' in df.columns
-        is_relatorio_objetos = 'Nu Pedido' in df.columns and 'CRIVO VENDAS' not in df.columns
+        # Detectar tipo de arquivo (normalizar nomes de colunas para comparação)
+        colunas_normalizadas = [str(c).strip().upper() for c in df.columns]
+        colunas_originais = list(df.columns)
+        
+        # Verificar colunas características de COVERTE BASE PROP
+        colunas_coverte = ['CRIVO VENDAS', 'DATA VENDA', 'PROPOSTA ISIZE', 'STATUS VENDA', 'PORTABILIDADE']
+        colunas_encontradas_coverte = [c for c in colunas_coverte if c in colunas_normalizadas]
+        
+        # Verificar colunas características de Relatorio_Objetos
+        colunas_objetos = ['NU PEDIDO', 'ID DO OBJETO', 'DESTINATARIO']
+        colunas_encontradas_objetos = [c for c in colunas_objetos if c in colunas_normalizadas]
+        
+        is_coverte_prop = len(colunas_encontradas_coverte) >= 2  # Pelo menos 2 colunas características
+        is_relatorio_objetos = len(colunas_encontradas_objetos) >= 2 and not is_coverte_prop
         
         if is_coverte_prop:
             logger.info("✅ Arquivo detectado: COVERTE BASE PROP")
+            logger.info(f"   Colunas identificadas: {', '.join(colunas_encontradas_coverte)}")
         elif is_relatorio_objetos:
             logger.warning("⚠️ Arquivo detectado: Relatorio_Objetos (estrutura diferente do COVERTE BASE PROP)")
             logger.warning("   Este script é para processar COVERTE BASE PROP!")
             logger.warning("   Use processar_atualizacoes_gerar_finais.py para Relatorio_Objetos")
         else:
             logger.warning("⚠️ Tipo de arquivo não identificado")
+            logger.warning(f"   Colunas COVERTE encontradas: {colunas_encontradas_coverte}")
+            logger.warning(f"   Colunas Objetos encontradas: {colunas_encontradas_objetos}")
         
         # Exibir colunas disponíveis para debug
         logger.info(f"Colunas encontradas no Excel ({len(df.columns)}):")
