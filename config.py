@@ -56,6 +56,19 @@ ARQUIVO_BASE_COVERTE_NETWORK = f"{PASTA_BASE_COVERTE_NETWORK}/{SMB_COVERTE_FILE}
 PASTA_BASE_COVERTE_LOCAL = str(PROJECT_ROOT / "data" / "entrada" / "excel")
 
 # =============================================================================
+# ARQUIVOS DE SAÍDA - HOMOLOGAÇÃO
+# =============================================================================
+
+# Pasta de saída para arquivos de homologação
+PASTA_SAIDA_HOMOLOGACAO = "/Applications/Documentos/Projetos_python/Retornos do gerenciador"
+
+# Arquivos de saída
+OUTPUT_WPP = str(PROJECT_ROOT / "data" / "homologacao_wpp.csv")
+OUTPUT_REABERTURA = str(PROJECT_ROOT / "data" / "homologacao_reabertura.xlsx")
+OUTPUT_APROVISIONAMENTOS = str(PROJECT_ROOT / "data" / "homologacao_aprovisionamento.xlsx")
+OUTPUT_ERRO_APROVISIONAMENTO = str(PROJECT_ROOT / "data" / "homologacao_erro_aprovisionamento.xlsx")
+
+# =============================================================================
 # CONFIGURAÇÃO DE PROCESSAMENTO
 # =============================================================================
 

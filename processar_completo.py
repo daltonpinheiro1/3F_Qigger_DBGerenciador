@@ -62,7 +62,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Configurações
+# Configurações - importar do config.py centralizado
 try:
     from config import (
         PASTA_IMPORTACOES,
@@ -71,10 +71,7 @@ try:
         PASTA_BASE_COVERTE_NETWORK,
         ARQUIVO_BASE_COVERTE_NETWORK,
         DB_PATH,
-        OUTPUT_WPP,
-        OUTPUT_APROVISIONAMENTOS,
-        OUTPUT_REABERTURA,
-        OUTPUT_ERRO_APROVISIONAMENTO
+        PASTA_SAIDA_HOMOLOGACAO,
     )
     pasta_importacoes = Path(PASTA_IMPORTACOES)
     pasta_entrada = Path(PASTA_ENTRADA)
@@ -82,17 +79,24 @@ try:
     pasta_coverte_network = Path(PASTA_BASE_COVERTE_NETWORK)
     arquivo_coverte_network = Path(ARQUIVO_BASE_COVERTE_NETWORK) if ARQUIVO_BASE_COVERTE_NETWORK else None
     db_path = DB_PATH
-except ImportError:
-    logger.warning("config.py não encontrado, usando valores padrão")
+    logger.info(f"✓ Configurações carregadas de config.py")
+    logger.info(f"  DB_PATH: {db_path}")
+    logger.info(f"  PASTA_COVERTE_NETWORK: {pasta_coverte_network}")
+except ImportError as e:
+    logger.warning(f"config.py não encontrado ou incompleto ({e}), usando valores padrão")
     pasta_importacoes = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
     pasta_entrada = Path(__file__).parent / "data" / "entrada"
     pasta_coverte_local = pasta_entrada / "excel"
     pasta_coverte_network = Path("/Volumes/02 Planejamento/02 - Relatórios/08 - Relatorios Cliente")
-    arquivo_coverte_network = None
+    arquivo_coverte_network = Path("/Volumes/02 Planejamento/02 - Relatórios/08 - Relatorios Cliente/COVERTE BASE PROP.xlsx")
     db_path = str(Path(__file__).parent / "data" / "portabilidade.db")
+    PASTA_SAIDA_HOMOLOGACAO = "/Applications/Documentos/Projetos_python/Retornos do gerenciador"
 
-# Pasta de saída para arquivos de homologação
-PASTA_SAIDA = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador")
+# Pasta de saída para arquivos de homologação (usar do config ou fallback)
+try:
+    PASTA_SAIDA = Path(PASTA_SAIDA_HOMOLOGACAO)
+except NameError:
+    PASTA_SAIDA = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador")
 
 # Scripts de homologação
 SCRIPTS_HOMOLOGACAO = [
