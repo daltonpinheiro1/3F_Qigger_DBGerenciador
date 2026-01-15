@@ -32,14 +32,18 @@ logger = logging.getLogger(__name__)
 
 # Caminhos - usar config.py centralizado
 try:
-    from config import DB_PATH, PASTA_IMPORTACOES
+    from config import DB_PATH, PASTA_IMPORTACOES, PASTA_SAIDA_HOMOLOGACAO
     OBJECTS_PATH = Path(PASTA_IMPORTACOES)
+    OUTPUT_HOMOLOGACAO = PASTA_SAIDA_HOMOLOGACAO / "homologacao_aprovisionamentos.csv"
+    OUTPUT_TEMP = PASTA_SAIDA_HOMOLOGACAO / "homologacao_aprovisionamentos_temp.csv"
 except ImportError:
     DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
     OBJECTS_PATH = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
+    OUTPUT_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_aprovisionamentos.csv")
+    OUTPUT_TEMP = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_aprovisionamentos_temp.csv")
 
-OUTPUT_HOMOLOGACAO = Path("data/homologacao_aprovisionamentos.csv")
-OUTPUT_TEMP = Path("data/homologacao_aprovisionamentos_temp.csv")
+# Garantir que pasta de saída existe
+OUTPUT_HOMOLOGACAO.parent.mkdir(parents=True, exist_ok=True)
 BASE_ANALITICA_PATH = Path("/dev/null")  # Agora usa base_coverte_prop do banco
 
 # Importar BaseAnaliticaLoader

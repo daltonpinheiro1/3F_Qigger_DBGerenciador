@@ -45,8 +45,7 @@ import pandas as pd
 
 # Caminhos (usar config centralizado)
 try:
-    from config import DB_PATH, OUTPUT_WPP
-    DB_PATH = DB_PATH
+    from config import DB_PATH, OUTPUT_WPP, PASTA_SAIDA_HOMOLOGACAO
     OUTPUT_HOMOLOGACAO = Path(OUTPUT_WPP)
     # Base analítica agora vem do banco unificado (base_unificada) ou Excel processado
     # Não precisa mais do arquivo CSV separado
@@ -54,11 +53,171 @@ try:
 except ImportError:
     # Fallback se config.py não existir - usar caminho absoluto
     DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
-    OUTPUT_HOMOLOGACAO = Path(__file__).parent / "data" / "homologacao_wpp.csv"
+    OUTPUT_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_wpp.csv")
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
+
+# Garantir que pasta de saída existe
+OUTPUT_HOMOLOGACAO.parent.mkdir(parents=True, exist_ok=True)
 
 # Palavras a ignorar ao extrair primeiro e último nome
 PALAVRAS_IGNORAR = {'e', 'de', 'da', 'do', 'das', 'dos', 'em', 'na', 'no', 'nas', 'nos'}
+
+# =============================================================================
+# CONFIGURAÇÃO DO GOOGLE SHEETS - HISTÓRICO DE ENVIOS
+# =============================================================================
+GOOGLE_SHEET_ID = '13qXylcL-wYbB4vDouI4d2rRazYQvaPEZneEmLx-lVtk'
+GOOGLE_SHEET_EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv'
+MAX_ENVIOS_POR_CLIENTE = 5  # Máximo de envios tipo 1 ou 2 antes de bloquear
+
+
+def carregar_historico_envios_gsheet() -> pd.DataFrame:
+    """
+    Carrega o histórico de envios do Google Sheets compartilhado na nuvem.
+    
+    Returns:
+        DataFrame com histórico de envios ou DataFrame vazio se falhar
+    """
+    try:
+        import requests
+        from io import StringIO
+        
+        logger.info("[GSHEET] Carregando histórico de envios do Google Sheets...")
+        
+        response = requests.get(GOOGLE_SHEET_EXPORT_URL, timeout=30)
+        
+        if response.status_code == 200 and 'text/csv' in response.headers.get('content-type', ''):
+            df = pd.read_csv(StringIO(response.text), dtype=str)
+            logger.info(f"[GSHEET] ✅ {len(df)} registros carregados do histórico")
+            return df
+        else:
+            logger.warning(f"[GSHEET] ⚠️ Não foi possível acessar Google Sheets (status: {response.status_code})")
+            return pd.DataFrame()
+            
+    except ImportError:
+        logger.warning("[GSHEET] ⚠️ Módulo 'requests' não instalado. Histórico não será verificado.")
+        return pd.DataFrame()
+    except Exception as e:
+        logger.error(f"[GSHEET] ❌ Erro ao carregar histórico: {e}")
+        return pd.DataFrame()
+
+
+def verificar_historico_cliente(
+    proposta_isize: str, 
+    cpf: str, 
+    tipo_comunicacao_novo: int,
+    historico_df: pd.DataFrame
+) -> int:
+    """
+    Verifica o histórico de envios de um cliente e determina o Tipo_Comunicacao correto.
+    
+    Regras:
+    1. Se último Tipo_Comunicacao = 1 e novo = 1 → retorna 2
+    2. Se total de envios com tipo 1 ou 2 >= 5 → retorna 0 (não enviar)
+    3. Caso contrário, mantém o tipo original
+    
+    Args:
+        proposta_isize: Código da proposta
+        cpf: CPF do cliente
+        tipo_comunicacao_novo: Tipo de comunicação da nova atualização
+        historico_df: DataFrame com histórico de envios
+        
+    Returns:
+        Tipo de comunicação ajustado (0, 1 ou 2)
+    """
+    if historico_df.empty:
+        return tipo_comunicacao_novo
+    
+    # Normalizar valores para busca
+    proposta_str = str(proposta_isize).strip() if proposta_isize else ''
+    cpf_str = str(cpf).strip() if cpf else ''
+    
+    # Buscar registros do cliente no histórico
+    mask = pd.Series([False] * len(historico_df))
+    
+    if proposta_str and 'Proposta_iSize' in historico_df.columns:
+        mask = mask | (historico_df['Proposta_iSize'].astype(str).str.strip() == proposta_str)
+    
+    if cpf_str and 'Cpf' in historico_df.columns:
+        mask = mask | (historico_df['Cpf'].astype(str).str.strip() == cpf_str)
+    
+    registros_cliente = historico_df[mask]
+    
+    if registros_cliente.empty:
+        # Cliente nunca recebeu mensagem
+        return tipo_comunicacao_novo
+    
+    # Contar envios com tipo 1 ou 2
+    if 'Tipo_Comunicacao' in registros_cliente.columns:
+        # Converter para numérico, tratando erros
+        tipos = pd.to_numeric(registros_cliente['Tipo_Comunicacao'], errors='coerce').fillna(0)
+        
+        # Contar envios efetivos (tipo 1 ou 2)
+        total_envios_efetivos = ((tipos == 1) | (tipos == 2)).sum()
+        
+        # Regra 2: Se já enviamos 5 vezes, não enviar mais
+        if total_envios_efetivos >= MAX_ENVIOS_POR_CLIENTE:
+            logger.debug(f"[GSHEET] Cliente {proposta_str or cpf_str}: {total_envios_efetivos} envios → Tipo 0 (bloqueado)")
+            return 0
+        
+        # Pegar último tipo de comunicação
+        ultimo_tipo = tipos.iloc[-1] if len(tipos) > 0 else 0
+        
+        # Regra 1: Se último foi 1 e novo é 1, classificar como 2
+        if ultimo_tipo == 1 and tipo_comunicacao_novo == 1:
+            logger.debug(f"[GSHEET] Cliente {proposta_str or cpf_str}: último=1, novo=1 → Tipo 2")
+            return 2
+    
+    return tipo_comunicacao_novo
+
+
+def processar_tipo_comunicacao_com_historico(
+    registros: list,
+    historico_df: pd.DataFrame
+) -> dict:
+    """
+    Processa todos os registros e ajusta o Tipo_Comunicacao baseado no histórico.
+    
+    Args:
+        registros: Lista de registros a processar
+        historico_df: DataFrame com histórico de envios
+        
+    Returns:
+        Dicionário com estatísticas {total, mantidos, alterados_para_2, bloqueados}
+    """
+    stats = {
+        'total': len(registros),
+        'mantidos': 0,
+        'alterados_para_2': 0,
+        'bloqueados': 0
+    }
+    
+    for registro in registros:
+        tipo_original = registro.get('tipo_comunicacao', 1)
+        if isinstance(tipo_original, str):
+            try:
+                tipo_original = int(tipo_original) if tipo_original.isdigit() else 1
+            except (ValueError, AttributeError):
+                tipo_original = 1
+        
+        tipo_ajustado = verificar_historico_cliente(
+            proposta_isize=registro.get('codigo_externo', ''),
+            cpf=registro.get('cpf', ''),
+            tipo_comunicacao_novo=tipo_original,
+            historico_df=historico_df
+        )
+        
+        # Atualizar registro com tipo ajustado
+        registro['tipo_comunicacao'] = tipo_ajustado
+        
+        # Contabilizar
+        if tipo_ajustado == 0:
+            stats['bloqueados'] += 1
+        elif tipo_ajustado == 2 and tipo_original == 1:
+            stats['alterados_para_2'] += 1
+        else:
+            stats['mantidos'] += 1
+    
+    return stats
 
 
 def normalizar_telefone(telefone: str) -> str:
@@ -718,11 +877,20 @@ def gerar_arquivo_homologacao():
         print("Nenhum registro com template encontrado!")
         return
     
+    # 2.0 Carregar histórico de envios do Google Sheets
+    print("[2.0] Carregando histórico de envios do Google Sheets...")
+    historico_envios_df = carregar_historico_envios_gsheet()
+    if not historico_envios_df.empty:
+        print(f"    >> {len(historico_envios_df)} registros no histórico de envios")
+    else:
+        print("    >> Histórico de envios não disponível (será ignorado)")
+    
     # 3. Processar registros e gerar dados de homologação
     print("[3] Processando registros e gerando preview de mensagens...")
     
     homologacao_data = []
     template_stats = {}
+    historico_stats = {'mantidos': 0, 'alterados_para_2': 0, 'bloqueados': 0}
     
     # Tentar carregar Relatório de Objetos para enriquecimento
     print("[2.1] Tentando carregar Relatório de Objetos para enriquecimento...")
@@ -1264,6 +1432,31 @@ def gerar_arquivo_homologacao():
         if template_triggers.upper() in ['EM CRIAÇÃO', 'EM CRIACAO', 'EM_CRIACAO']:
             tipo_comunicacao = '1'
         
+        # Converter tipo_comunicacao para int para verificação de histórico
+        try:
+            tipo_comunicacao_int = int(tipo_comunicacao) if str(tipo_comunicacao).isdigit() else 1
+        except (ValueError, TypeError):
+            tipo_comunicacao_int = 1
+        
+        # Verificar histórico de envios e ajustar Tipo_Comunicacao
+        if not historico_envios_df.empty:
+            tipo_comunicacao_ajustado = verificar_historico_cliente(
+                proposta_isize=record.codigo_externo,
+                cpf=record.cpf,
+                tipo_comunicacao_novo=tipo_comunicacao_int,
+                historico_df=historico_envios_df
+            )
+            
+            # Contabilizar alterações
+            if tipo_comunicacao_ajustado == 0:
+                historico_stats['bloqueados'] += 1
+            elif tipo_comunicacao_ajustado == 2 and tipo_comunicacao_int == 1:
+                historico_stats['alterados_para_2'] += 1
+            else:
+                historico_stats['mantidos'] += 1
+            
+            tipo_comunicacao = str(tipo_comunicacao_ajustado)
+        
         # Ordem IMUTÁVEL das colunas principais (conforme especificado para Google Sheets)
         row_data = {
             'Proposta_iSize': record.codigo_externo or '',
@@ -1362,6 +1555,32 @@ def gerar_arquivo_homologacao():
         config = TEMPLATES.get(template_id)
         nome = config.nome_modelo if config else f"Template {template_id}"
         print(f"    Template {template_id} ({nome}): {count} registros")
+    
+    # Estatísticas de verificação de histórico
+    if not historico_envios_df.empty:
+        print()
+        print("  Verificação de Histórico (Google Sheets):")
+        print(f"    Registros mantidos: {historico_stats['mantidos']}")
+        print(f"    Alterados de 1→2 (reenvio): {historico_stats['alterados_para_2']}")
+        print(f"    Bloqueados (≥{MAX_ENVIOS_POR_CLIENTE} envios): {historico_stats['bloqueados']}")
+        
+        # Contar quantos registros por tipo final
+        tipos_finais = {}
+        for row in homologacao_data:
+            tipo = row.get('Tipo_Comunicacao', '1')
+            tipos_finais[tipo] = tipos_finais.get(tipo, 0) + 1
+        
+        print()
+        print("  Por Tipo_Comunicacao final:")
+        for tipo, count in sorted(tipos_finais.items()):
+            status = ""
+            if tipo == '0':
+                status = "(BLOQUEADO - não enviar)"
+            elif tipo == '1':
+                status = "(primeira comunicação)"
+            elif tipo == '2':
+                status = "(segunda comunicação)"
+            print(f"    Tipo {tipo}: {count} registros {status}")
     
     print()
     print("-" * 70)

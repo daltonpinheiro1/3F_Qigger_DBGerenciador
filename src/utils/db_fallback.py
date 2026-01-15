@@ -235,11 +235,13 @@ def buscar_dados_com_fallback(
                 return resultado
             
             # PRIORIDADE 1: base_coverte_prop (tabela mais completa)
+            # Nota: base_coverte_prop não tem coluna 'preco', o preço está incluído no campo 'plano'
+            # Ex: "TIM CONTROLE A PLUS - 31,99" -> preço é extraído depois se necessário
             if 'base_coverte_prop' in tabelas_existentes:
                 query_base = f"""
                 SELECT 
                     bc.plano,
-                    bc.preco,
+                    NULL AS preco,
                     bc.numero_ordem,
                     bc.telefone_portado,
                     bc.numero_linha,
@@ -256,8 +258,13 @@ def buscar_dados_com_fallback(
                 row = cursor.fetchone()
                 
                 if row and any(row):
-                    resultado['plano'] = str(row[0]).strip() if row[0] else ''
-                    resultado['preco'] = str(row[1]).strip() if row[1] else ''
+                    plano_valor = str(row[0]).strip() if row[0] else ''
+                    resultado['plano'] = plano_valor
+                    # Extrair preço do plano se contiver " - " (ex: "TIM CONTROLE A PLUS - 31,99")
+                    if ' - ' in plano_valor:
+                        partes = plano_valor.split(' - ')
+                        if len(partes) > 1:
+                            resultado['preco'] = partes[-1].strip()
                     resultado['numero_ordem'] = str(row[2]).strip() if row[2] else ''
                     resultado['telefone_portado'] = str(row[3]).strip() if row[3] else ''
                     resultado['numero_linha'] = str(row[4]).strip() if row[4] else ''
@@ -267,20 +274,21 @@ def buscar_dados_com_fallback(
                     resultado['proposta_isize'] = str(row[8]).strip() if row[8] else ''
             
             # PRIORIDADE 2: base_unificada (se campos ainda faltando)
+            # Nota: base_unificada não tem 'plano' nem 'numero_linha', tem 'preco_ordem'
             if 'base_unificada' in tabelas_existentes:
                 campos_faltando = [k for k, v in resultado.items() if not v]
                 if campos_faltando:
                     query_fallback = """
                     SELECT 
-                        bu.plano,
-                        bu.preco,
+                        NULL AS plano,
+                        bu.preco_ordem AS preco,
                         bu.numero_ordem,
                         bu.telefone_portado,
-                        bu.numero_linha,
+                        NULL AS numero_linha,
                         bu.cliente_nome,
                         bu.cpf,
                         bu.codigo_externo,
-                        NULL AS proposta_isize
+                        bu.proposta_isize
                     FROM base_unificada bu
                     WHERE {condicao}
                     LIMIT 1
@@ -306,6 +314,8 @@ def buscar_dados_com_fallback(
                             resultado['cpf'] = str(row[6]).strip()
                         if not resultado['codigo_externo'] and row[7]:
                             resultado['codigo_externo'] = str(row[7]).strip()
+                        if not resultado['proposta_isize'] and row[8]:
+                            resultado['proposta_isize'] = str(row[8]).strip()
             
             # PRIORIDADE 3: tim_unificado (versão mais recente)
             if 'tim_unificado' in tabelas_existentes:

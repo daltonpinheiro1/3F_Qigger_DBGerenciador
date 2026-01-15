@@ -33,19 +33,21 @@ logger = logging.getLogger(__name__)
 
 # Caminhos (usar config centralizado)
 try:
-    from config import DB_PATH, PASTA_IMPORTACOES
-    DB_PATH = DB_PATH
-    OUTPUT_HOMOLOGACAO = Path("data/homologacao_erro_aprovisionamento.xlsx")
+    from config import DB_PATH, OUTPUT_ERRO_APROVISIONAMENTO, PASTA_IMPORTACOES, PASTA_SAIDA_HOMOLOGACAO
+    OUTPUT_HOMOLOGACAO = Path(OUTPUT_ERRO_APROVISIONAMENTO)
     OBJECTS_PATH = Path(PASTA_IMPORTACOES)
+    OUTPUT_TEMP = PASTA_SAIDA_HOMOLOGACAO / "homologacao_erro_aprovisionamento_temp.xlsx"
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 except ImportError:
     # Fallback se config.py não existir - usar caminho absoluto
     DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
-    OUTPUT_HOMOLOGACAO = Path(__file__).parent / "data" / "homologacao_erro_aprovisionamento.xlsx"
+    OUTPUT_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_erro_aprovisionamento.xlsx")
+    OUTPUT_TEMP = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_erro_aprovisionamento_temp.xlsx")
     OBJECTS_PATH = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 
-OUTPUT_TEMP = Path("data/homologacao_erro_aprovisionamento_temp.xlsx")
+# Garantir que pasta de saída existe
+OUTPUT_HOMOLOGACAO.parent.mkdir(parents=True, exist_ok=True)
 
 # Importar BaseAnaliticaLoader
 from gerar_homologacao_wpp import BaseAnaliticaLoader

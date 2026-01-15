@@ -41,11 +41,14 @@ except ImportError:
 
 # Caminhos - usar config.py centralizado
 try:
-    from config import DB_PATH
+    from config import DB_PATH, PASTA_SAIDA_HOMOLOGACAO
+    OUTPUT_PATH = PASTA_SAIDA_HOMOLOGACAO / "homologacao_consulta.xlsx"
 except ImportError:
     DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
+    OUTPUT_PATH = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_consulta.xlsx")
 
-OUTPUT_PATH = Path("data/homologacao_consulta.xlsx")
+# Garantir que pasta de saída existe
+OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 BASE_ANALITICA_PATH = Path("/dev/null")  # Agora usa base_coverte_prop do banco
 
 

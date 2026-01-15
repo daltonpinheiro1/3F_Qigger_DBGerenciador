@@ -60,13 +60,16 @@ PASTA_BASE_COVERTE_LOCAL = str(PROJECT_ROOT / "data" / "entrada" / "excel")
 # =============================================================================
 
 # Pasta de saída para arquivos de homologação
-PASTA_SAIDA_HOMOLOGACAO = "/Applications/Documentos/Projetos_python/Retornos do gerenciador"
+PASTA_SAIDA_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador")
 
-# Arquivos de saída
-OUTPUT_WPP = str(PROJECT_ROOT / "data" / "homologacao_wpp.csv")
-OUTPUT_REABERTURA = str(PROJECT_ROOT / "data" / "homologacao_reabertura.xlsx")
-OUTPUT_APROVISIONAMENTOS = str(PROJECT_ROOT / "data" / "homologacao_aprovisionamento.xlsx")
-OUTPUT_ERRO_APROVISIONAMENTO = str(PROJECT_ROOT / "data" / "homologacao_erro_aprovisionamento.xlsx")
+# Criar pasta de saída se não existir
+PASTA_SAIDA_HOMOLOGACAO.mkdir(parents=True, exist_ok=True)
+
+# Arquivos de saída (salvos na pasta de homologação)
+OUTPUT_WPP = str(PASTA_SAIDA_HOMOLOGACAO / "homologacao_wpp.csv")
+OUTPUT_REABERTURA = str(PASTA_SAIDA_HOMOLOGACAO / "homologacao_reabertura.xlsx")
+OUTPUT_APROVISIONAMENTOS = str(PASTA_SAIDA_HOMOLOGACAO / "homologacao_aprovisionamento.xlsx")
+OUTPUT_ERRO_APROVISIONAMENTO = str(PASTA_SAIDA_HOMOLOGACAO / "homologacao_erro_aprovisionamento.xlsx")
 
 # =============================================================================
 # CONFIGURAÇÃO DE PROCESSAMENTO

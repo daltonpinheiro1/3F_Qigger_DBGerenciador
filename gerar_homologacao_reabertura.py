@@ -31,12 +31,17 @@ logger = logging.getLogger(__name__)
 
 # Caminhos - usar config.py centralizado
 try:
-    from config import DB_PATH
+    from config import DB_PATH, OUTPUT_REABERTURA, PASTA_SAIDA_HOMOLOGACAO
+    OUTPUT_HOMOLOGACAO = Path(OUTPUT_REABERTURA)
+    OUTPUT_TEMP = PASTA_SAIDA_HOMOLOGACAO / "homologacao_reabertura_temp.xlsx"
 except ImportError:
     DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
+    OUTPUT_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_reabertura.xlsx")
+    OUTPUT_TEMP = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_reabertura_temp.xlsx")
 
-OUTPUT_HOMOLOGACAO = Path("data/homologacao_reabertura.xlsx")
-OUTPUT_TEMP = Path("data/homologacao_reabertura_temp.xlsx")
+# Garantir que pasta de saída existe
+OUTPUT_HOMOLOGACAO.parent.mkdir(parents=True, exist_ok=True)
+
 # Base analítica agora vem do banco (base_coverte_prop) - não precisa mais de arquivo CSV
 BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 
@@ -286,7 +291,8 @@ def main():
         reabertura,
         results_map,
         output_path,
-        base_analitica_loader
+        base_analitica_loader,
+        db_manager  # Passar db_manager para buscar plano da base_coverte_prop
     ):
         # Renomear para o arquivo final
         try:
