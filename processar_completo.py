@@ -123,8 +123,13 @@ SCRIPTS_HOMOLOGACAO = [
 ]
 
 
-def processar_excel_coverte_prop() -> dict:
-    """Processa Excel COVERTE BASE PROP.xlsx"""
+def processar_excel_coverte_prop(usar_smb: bool = True) -> dict:
+    """
+    Processa Excel COVERTE BASE PROP.xlsx
+    
+    Args:
+        usar_smb: Se True, tenta conectar via SMB automaticamente
+    """
     logger.info("=" * 70)
     logger.info("ETAPA 1: PROCESSANDO EXCEL COVERTE BASE PROP.xlsx")
     logger.info("=" * 70)
@@ -136,24 +141,50 @@ def processar_excel_coverte_prop() -> dict:
     }
     
     try:
-        from processar_excel_unificado import processar_excel_unificado, encontrar_arquivo_excel
+        from processar_excel_unificado import (
+            processar_excel_unificado, 
+            encontrar_arquivo_excel,
+            obter_arquivo_coverte_smb,
+            verificar_conexao_smb,
+            montar_compartilhamento_smb
+        )
         
-        # Procurar arquivo (prioridade: arquivo específico > rede > local > entrada)
+        # Procurar arquivo (prioridade: SMB > arquivo específico > rede > local > entrada)
         arquivo_coverte = None
         
-        if arquivo_coverte_network and arquivo_coverte_network.exists():
+        # 1. Tentar SMB primeiro se solicitado
+        if usar_smb:
+            logger.info("📡 Verificando conexão SMB...")
+            if not verificar_conexao_smb():
+                logger.info("🔌 Tentando montar compartilhamento SMB automaticamente...")
+                if montar_compartilhamento_smb():
+                    logger.info("✓ Compartilhamento SMB montado com sucesso!")
+                else:
+                    logger.warning("⚠️ Não foi possível montar SMB automaticamente")
+            
+            # Tentar obter arquivo via SMB
+            arquivo_coverte = obter_arquivo_coverte_smb()
+            if arquivo_coverte:
+                logger.info(f"✓ Arquivo encontrado via SMB: {arquivo_coverte.name}")
+        
+        # 2. Arquivo específico configurado
+        if not arquivo_coverte and arquivo_coverte_network and arquivo_coverte_network.exists():
             arquivo_coverte = arquivo_coverte_network
             logger.info(f"✓ Arquivo encontrado (caminho específico): {arquivo_coverte}")
-        elif pasta_coverte_network.exists():
+        
+        # 3. Pasta de rede (se montada)
+        if not arquivo_coverte and pasta_coverte_network.exists():
             arquivo_coverte = encontrar_arquivo_excel(pasta_coverte_network)
             if arquivo_coverte:
                 logger.info(f"✓ Arquivo encontrado na rede: {arquivo_coverte.name}")
         
+        # 4. Pasta local (cópia)
         if not arquivo_coverte:
             arquivo_coverte = encontrar_arquivo_excel(pasta_coverte_local)
             if arquivo_coverte:
                 logger.info(f"✓ Arquivo encontrado localmente: {arquivo_coverte.name}")
         
+        # 5. Pasta de entrada
         if not arquivo_coverte:
             arquivo_coverte = encontrar_arquivo_excel(pasta_entrada)
             if arquivo_coverte:
@@ -168,10 +199,14 @@ def processar_excel_coverte_prop() -> dict:
             logger.info(f"✅ Excel processado: {stats_processamento.get('processados', 0)} registros")
         else:
             logger.warning("⚠️ Arquivo COVERTE BASE PROP.xlsx não encontrado")
-            logger.info("Pastas verificadas:")
-            logger.info(f"  - Rede: {pasta_coverte_network}")
-            logger.info(f"  - Local: {pasta_coverte_local}")
-            logger.info(f"  - Entrada: {pasta_entrada}")
+            logger.info("")
+            logger.info("Pastas verificadas (em ordem de prioridade):")
+            logger.info(f"  1. SMB: smb://files/02 Planejamento/02 - Relatórios/08 - Relatorios Cliente/")
+            logger.info(f"  2. Rede: {pasta_coverte_network}")
+            logger.info(f"  3. Local: {pasta_coverte_local}")
+            logger.info(f"  4. Entrada: {pasta_entrada}")
+            logger.info("")
+            logger.info("💡 Dica: Monte o compartilhamento SMB manualmente via Finder > Cmd+K")
     
     except ImportError as e:
         logger.error(f"❌ Erro de importação ao processar Excel: {e}")
@@ -488,6 +523,19 @@ Exemplos:
         help='Pula o processamento do Relatorio_Objetos'
     )
     
+    parser.add_argument(
+        '--smb',
+        action='store_true',
+        default=True,
+        help='Conectar automaticamente ao compartilhamento SMB (padrão: ativado)'
+    )
+    
+    parser.add_argument(
+        '--no-smb',
+        action='store_true',
+        help='Desativar conexão automática SMB'
+    )
+    
     args = parser.parse_args()
     
     # Início
@@ -510,7 +558,8 @@ Exemplos:
     if not args.apenas_homologacao:
         # 1. Excel COVERTE BASE PROP
         if not args.skip_excel:
-            stats_geral['excel'] = processar_excel_coverte_prop()
+            usar_smb = args.smb and not args.no_smb
+            stats_geral['excel'] = processar_excel_coverte_prop(usar_smb=usar_smb)
         else:
             logger.info("⏭️ Pulando processamento do Excel (--skip-excel)")
             logger.info("")

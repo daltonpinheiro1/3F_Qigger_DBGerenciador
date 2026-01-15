@@ -64,6 +64,204 @@ except ImportError:
     DB_PATH_RELATIVO = Path(__file__).parent / "data" / "portabilidade.db"
     DB_PATH = str(DB_PATH_RELATIVO)
 
+# Configuração do compartilhamento SMB
+SMB_SERVER = "files"
+SMB_SHARE = "02 Planejamento"
+SMB_PATH = "02 - Relatórios/08 - Relatorios Cliente"
+SMB_FILE = "COVERTE BASE PROP.xlsx"
+SMB_MOUNT_POINT = f"/Volumes/{SMB_SHARE}"
+
+
+def verificar_conexao_smb() -> bool:
+    """
+    Verifica se o compartilhamento SMB está montado.
+    
+    Returns:
+        True se o compartilhamento está acessível
+    """
+    mount_point = Path(SMB_MOUNT_POINT)
+    if mount_point.exists() and mount_point.is_dir():
+        # Verificar se realmente é um mount point ativo
+        try:
+            list(mount_point.iterdir())
+            return True
+        except (PermissionError, OSError):
+            return False
+    return False
+
+
+def montar_compartilhamento_smb(usuario: str = None, senha: str = None) -> bool:
+    """
+    Monta o compartilhamento SMB no macOS.
+    
+    Args:
+        usuario: Nome de usuário para autenticação (opcional, usa credenciais do Keychain)
+        senha: Senha para autenticação (opcional)
+        
+    Returns:
+        True se montou com sucesso ou já estava montado
+    """
+    import subprocess
+    import platform
+    
+    if platform.system() != 'Darwin':
+        logger.warning("Montagem SMB automática disponível apenas no macOS")
+        return False
+    
+    # Verificar se já está montado
+    if verificar_conexao_smb():
+        logger.info(f"✓ Compartilhamento SMB já está montado: {SMB_MOUNT_POINT}")
+        return True
+    
+    logger.info(f"Tentando montar compartilhamento SMB: smb://{SMB_SERVER}/{SMB_SHARE}")
+    
+    try:
+        # Criar ponto de montagem se não existir
+        mount_point = Path(SMB_MOUNT_POINT)
+        if not mount_point.exists():
+            mount_point.mkdir(parents=True, exist_ok=True)
+        
+        # Construir URL SMB
+        if usuario and senha:
+            # Com credenciais explícitas
+            smb_url = f"smb://{usuario}:{senha}@{SMB_SERVER}/{SMB_SHARE}"
+        elif usuario:
+            # Apenas usuário (senha será solicitada ou do Keychain)
+            smb_url = f"smb://{usuario}@{SMB_SERVER}/{SMB_SHARE}"
+        else:
+            # Usar credenciais do Keychain (mais seguro)
+            smb_url = f"smb://{SMB_SERVER}/{SMB_SHARE}"
+        
+        # Método 1: Tentar com mount_smbfs (silencioso, usa Keychain)
+        result = subprocess.run(
+            ['mount', '-t', 'smbfs', smb_url, str(mount_point)],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            logger.info(f"✓ Compartilhamento SMB montado com sucesso: {SMB_MOUNT_POINT}")
+            return True
+        
+        # Método 2: Tentar com open (abre o Finder para montar interativamente)
+        logger.info("Tentando método alternativo via Finder...")
+        result = subprocess.run(
+            ['open', f'smb://{SMB_SERVER}/{SMB_SHARE}'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        # Aguardar um pouco para o Finder montar
+        import time
+        for i in range(10):
+            time.sleep(1)
+            if verificar_conexao_smb():
+                logger.info(f"✓ Compartilhamento SMB montado via Finder: {SMB_MOUNT_POINT}")
+                return True
+        
+        logger.warning(f"⚠️ Não foi possível montar automaticamente. Monte manualmente:")
+        logger.warning(f"   1. Finder > Cmd+K (Conectar ao Servidor)")
+        logger.warning(f"   2. Digite: smb://{SMB_SERVER}/{SMB_SHARE}")
+        logger.warning(f"   3. Autentique com suas credenciais")
+        return False
+        
+    except subprocess.TimeoutExpired:
+        logger.warning("Timeout ao tentar montar compartilhamento SMB")
+        return False
+    except Exception as e:
+        logger.error(f"Erro ao montar compartilhamento SMB: {e}")
+        return False
+
+
+def obter_arquivo_coverte_smb() -> Optional[Path]:
+    """
+    Obtém o caminho do arquivo COVERTE BASE PROP.xlsx no compartilhamento SMB.
+    Tenta montar automaticamente se não estiver montado.
+    
+    Returns:
+        Caminho do arquivo ou None se não encontrado
+    """
+    # Verificar se já existe localmente na pasta de entrada
+    arquivo_local = PASTA_ENTRADA_PATH / "COVERTE BASE PROP.xlsx"
+    if arquivo_local.exists() and validar_arquivo_excel(arquivo_local):
+        logger.info(f"✓ Usando arquivo local: {arquivo_local}")
+        return arquivo_local
+    
+    # Tentar montar o compartilhamento SMB
+    if not verificar_conexao_smb():
+        logger.info("Compartilhamento SMB não montado. Tentando montar...")
+        if not montar_compartilhamento_smb():
+            return None
+    
+    # Construir caminho completo do arquivo
+    arquivo_rede = Path(SMB_MOUNT_POINT) / SMB_PATH / SMB_FILE
+    
+    if arquivo_rede.exists():
+        # Resolver alias se necessário
+        arquivo_rede = resolver_alias_macos(arquivo_rede)
+        
+        if validar_arquivo_excel(arquivo_rede):
+            logger.info(f"✓ Arquivo encontrado na rede: {arquivo_rede}")
+            return arquivo_rede
+        else:
+            logger.warning(f"⚠️ Arquivo na rede não é válido: {arquivo_rede}")
+    else:
+        logger.warning(f"⚠️ Arquivo não encontrado na rede: {arquivo_rede}")
+        
+        # Listar arquivos disponíveis para debug
+        pasta_rede = Path(SMB_MOUNT_POINT) / SMB_PATH
+        if pasta_rede.exists():
+            logger.info(f"Arquivos disponíveis em {pasta_rede}:")
+            try:
+                for f in pasta_rede.glob("*.xlsx"):
+                    logger.info(f"  - {f.name}")
+            except PermissionError:
+                logger.warning("  (sem permissão para listar)")
+    
+    return None
+
+
+def copiar_arquivo_para_local(arquivo_origem: Path) -> Optional[Path]:
+    """
+    Copia arquivo da rede para pasta local (para processamento mais rápido).
+    
+    Args:
+        arquivo_origem: Caminho do arquivo na rede
+        
+    Returns:
+        Caminho do arquivo local ou None se falhou
+    """
+    import shutil
+    
+    if not arquivo_origem or not arquivo_origem.exists():
+        return None
+    
+    try:
+        # Criar pasta de entrada se não existir
+        PASTA_ENTRADA_PATH.mkdir(parents=True, exist_ok=True)
+        
+        arquivo_destino = PASTA_ENTRADA_PATH / arquivo_origem.name
+        
+        # Copiar arquivo
+        logger.info(f"Copiando arquivo da rede para local...")
+        shutil.copy2(arquivo_origem, arquivo_destino)
+        
+        if arquivo_destino.exists() and validar_arquivo_excel(arquivo_destino):
+            logger.info(f"✓ Arquivo copiado: {arquivo_destino}")
+            return arquivo_destino
+        else:
+            logger.warning(f"⚠️ Falha ao copiar arquivo")
+            return None
+            
+    except PermissionError as e:
+        logger.error(f"Sem permissão para copiar arquivo: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Erro ao copiar arquivo: {e}")
+        return None
+
 
 def resolver_alias_macos(caminho: Path) -> Path:
     """
@@ -882,6 +1080,19 @@ def main():
         help=f'Caminho para o banco de dados (padrão: {DB_PATH})'
     )
     
+    parser.add_argument(
+        '--smb',
+        action='store_true',
+        help='Conectar automaticamente ao compartilhamento SMB (smb://files/02 Planejamento)'
+    )
+    
+    parser.add_argument(
+        '--copiar-local',
+        action='store_true',
+        dest='copiar_local',
+        help='Copiar arquivo da rede para pasta local antes de processar (mais rápido)'
+    )
+    
     args = parser.parse_args()
     
     arquivo_excel = None
@@ -895,15 +1106,31 @@ def main():
             logger.error(f"Nenhum arquivo Excel encontrado em: {pasta}")
             return
     else:
-        # Tentar múltiplas pastas (prioridade: COVERTE BASE PROP, depois outras)
+        # Tentar múltiplas fontes (prioridade: COVERTE BASE PROP, depois outras)
         arquivo_excel = None
         
-        # 1. PRIORIDADE: Tentar arquivo específico se configurado
-        if 'ARQUIVO_BASE_COVERTE' in globals() and ARQUIVO_BASE_COVERTE and ARQUIVO_BASE_COVERTE.exists():
-            arquivo_excel = ARQUIVO_BASE_COVERTE
-            logger.info(f"✓ Arquivo COVERTE BASE PROP encontrado (caminho específico): {arquivo_excel}")
-        # 2. Tentar pasta da base unificada (COVERTE BASE PROP) na rede
-        elif CAMINHO_BASE_NETWORK.exists():
+        # 1. PRIORIDADE: Tentar via SMB se solicitado ou se rede não estiver montada
+        if args.smb or not CAMINHO_BASE_NETWORK.exists():
+            logger.info("=" * 70)
+            logger.info("🔌 CONEXÃO SMB")
+            logger.info("=" * 70)
+            arquivo_excel = obter_arquivo_coverte_smb()
+            
+            # Se encontrou e solicitou cópia local, copiar
+            if arquivo_excel and args.copiar_local:
+                arquivo_local = copiar_arquivo_para_local(arquivo_excel)
+                if arquivo_local:
+                    arquivo_excel = arquivo_local
+                    logger.info(f"✓ Usando cópia local para processamento mais rápido")
+        
+        # 2. Tentar arquivo específico se configurado
+        if not arquivo_excel:
+            if 'ARQUIVO_BASE_COVERTE' in globals() and ARQUIVO_BASE_COVERTE and ARQUIVO_BASE_COVERTE.exists():
+                arquivo_excel = ARQUIVO_BASE_COVERTE
+                logger.info(f"✓ Arquivo COVERTE BASE PROP encontrado (caminho específico): {arquivo_excel}")
+        
+        # 3. Tentar pasta da base unificada (COVERTE BASE PROP) na rede
+        if not arquivo_excel and CAMINHO_BASE_NETWORK.exists():
             # Buscar especificamente por "COVERTE BASE PROP.xlsx" primeiro
             arquivos_coverte = list(CAMINHO_BASE_NETWORK.glob("COVERTE BASE PROP*.xlsx"))
             if not arquivos_coverte:
@@ -915,45 +1142,61 @@ def main():
                 logger.info(f"✓ Arquivo COVERTE BASE PROP encontrado na rede: {arquivo_excel.name}")
                 logger.info(f"  Caminho: {arquivo_excel}")
         
-        # Se não encontrou na rede, verificar se há arquivo local copiado
+        # 4. Se não encontrou na rede, verificar se há arquivo local copiado
         if not arquivo_excel and CAMINHO_BASE_LOCAL.exists():
             arquivos_coverte_local = list(CAMINHO_BASE_LOCAL.glob("COVERTE BASE PROP*.xlsx"))
             if arquivos_coverte_local:
                 arquivo_excel = max(arquivos_coverte_local, key=lambda x: x.stat().st_mtime)
                 logger.info(f"✓ Arquivo COVERTE BASE PROP encontrado localmente: {arquivo_excel.name}")
         
-        # 2. Tentar pasta de importações
+        # 5. Tentar pasta de importações
         if not arquivo_excel and PASTA_IMPORTACOES_PATH.exists():
             arquivo_excel = encontrar_arquivo_excel(PASTA_IMPORTACOES_PATH)
             if arquivo_excel:
                 logger.info(f"Arquivo Excel encontrado em pasta de importações: {arquivo_excel.name}")
         
-        # 3. Tentar pasta local se não encontrou
+        # 6. Tentar pasta local se não encontrou
         if not arquivo_excel:
             CAMINHO_BASE_LOCAL.mkdir(parents=True, exist_ok=True)
             arquivo_excel = encontrar_arquivo_excel(CAMINHO_BASE_LOCAL)
             if arquivo_excel:
                 logger.info(f"Arquivo Excel encontrado em pasta local: {arquivo_excel.name}")
         
-        # 4. Tentar pasta de entrada geral
+        # 7. Tentar pasta de entrada geral
         if not arquivo_excel and PASTA_ENTRADA_PATH.exists():
             arquivo_excel = encontrar_arquivo_excel(PASTA_ENTRADA_PATH)
             if arquivo_excel:
                 logger.info(f"Arquivo Excel encontrado em pasta de entrada: {arquivo_excel.name}")
         
+        # 8. Última tentativa: tentar SMB automaticamente
         if not arquivo_excel:
-            logger.error("Nenhum arquivo Excel especificado ou encontrado.")
-            logger.info("Use --arquivo <caminho> ou --pasta <pasta>")
-            logger.info(f"Pastas verificadas (em ordem de prioridade):")
-            logger.info(f"  1. Base Unificada (rede): {CAMINHO_BASE_NETWORK}")
-            logger.info(f"  2. Pasta de importações: {PASTA_IMPORTACOES_PATH}")
-            logger.info(f"  3. Pasta local: {CAMINHO_BASE_LOCAL}")
-            logger.info(f"  4. Pasta de entrada: {PASTA_ENTRADA_PATH}")
             logger.info("")
-            logger.info("Para montar o caminho de rede no Mac:")
+            logger.info("📡 Tentando conexão SMB automática...")
+            arquivo_excel = obter_arquivo_coverte_smb()
+        
+        if not arquivo_excel:
+            logger.error("=" * 70)
+            logger.error("❌ Nenhum arquivo Excel especificado ou encontrado.")
+            logger.error("=" * 70)
+            logger.info("")
+            logger.info("Opções disponíveis:")
+            logger.info("  --arquivo <caminho>  : Especificar arquivo diretamente")
+            logger.info("  --pasta <pasta>      : Buscar em pasta específica")
+            logger.info("  --smb                : Conectar via SMB automaticamente")
+            logger.info("  --copiar-local       : Copiar arquivo da rede para local")
+            logger.info("")
+            logger.info(f"Pastas verificadas (em ordem de prioridade):")
+            logger.info(f"  1. SMB: smb://{SMB_SERVER}/{SMB_SHARE}/{SMB_PATH}/{SMB_FILE}")
+            logger.info(f"  2. Arquivo config: {ARQUIVO_BASE_COVERTE if 'ARQUIVO_BASE_COVERTE' in globals() else 'N/A'}")
+            logger.info(f"  3. Base Unificada (rede): {CAMINHO_BASE_NETWORK}")
+            logger.info(f"  4. Pasta local: {CAMINHO_BASE_LOCAL}")
+            logger.info(f"  5. Pasta de importações: {PASTA_IMPORTACOES_PATH}")
+            logger.info(f"  6. Pasta de entrada: {PASTA_ENTRADA_PATH}")
+            logger.info("")
+            logger.info("Para montar manualmente o caminho de rede no Mac:")
             logger.info("  1. Finder > Cmd+K (Connect to Server)")
-            logger.info("  2. Digite: smb://files")
-            logger.info("  3. Navegue até: 02 Planejamento/02 - Relatórios/08 - Relatorios Cliente/COVERTE BASE PROP")
+            logger.info(f"  2. Digite: smb://{SMB_SERVER}/{SMB_SHARE}")
+            logger.info(f"  3. Navegue até: {SMB_PATH}/{SMB_FILE}")
             return
     
     logger.info("=" * 70)
