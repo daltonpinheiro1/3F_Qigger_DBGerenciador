@@ -38,9 +38,9 @@ try:
     OBJECTS_PATH = Path(PASTA_IMPORTACOES)
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 except ImportError:
-    # Fallback se config.py não existir
-    DB_PATH = "data/portabilidade.db"
-    OUTPUT_HOMOLOGACAO = Path("data/homologacao_aprovisionamento.xlsx")
+    # Fallback se config.py não existir - usar caminho absoluto
+    DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
+    OUTPUT_HOMOLOGACAO = Path(__file__).parent / "data" / "homologacao_aprovisionamento.xlsx"
     OBJECTS_PATH = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 

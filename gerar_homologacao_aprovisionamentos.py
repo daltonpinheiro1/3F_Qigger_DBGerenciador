@@ -30,12 +30,17 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Caminhos
-DB_PATH = "data/portabilidade.db"
+# Caminhos - usar config.py centralizado
+try:
+    from config import DB_PATH, PASTA_IMPORTACOES
+    OBJECTS_PATH = Path(PASTA_IMPORTACOES)
+except ImportError:
+    DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
+    OBJECTS_PATH = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
+
 OUTPUT_HOMOLOGACAO = Path("data/homologacao_aprovisionamentos.csv")
 OUTPUT_TEMP = Path("data/homologacao_aprovisionamentos_temp.csv")
-OBJECTS_PATH = Path(r"C:\Users\dspin\OneDrive\Documents\IMPORTACOES_QIGGER")
-BASE_ANALITICA_PATH = Path(r"G:\Meu Drive\3F Contact Center\base_analitica_final.csv")
+BASE_ANALITICA_PATH = Path("/dev/null")  # Agora usa base_coverte_prop do banco
 
 # Importar BaseAnaliticaLoader
 from gerar_homologacao_wpp import BaseAnaliticaLoader

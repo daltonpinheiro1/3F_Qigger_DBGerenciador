@@ -39,10 +39,14 @@ except ImportError:
     BaseAnaliticaLoader = None
     logger.warning("BaseAnaliticaLoader não encontrado. Filtro de crivo aprovada não estará disponível.")
 
-# Caminhos
-DB_PATH = "data/portabilidade.db"
+# Caminhos - usar config.py centralizado
+try:
+    from config import DB_PATH
+except ImportError:
+    DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
+
 OUTPUT_PATH = Path("data/homologacao_consulta.xlsx")
-BASE_ANALITICA_PATH = Path(r"G:\Meu Drive\3F Contact Center\base_analitica_final.csv")
+BASE_ANALITICA_PATH = Path("/dev/null")  # Agora usa base_coverte_prop do banco
 
 
 def parse_date(date_str: str) -> Optional[date]:

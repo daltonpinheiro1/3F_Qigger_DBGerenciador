@@ -29,8 +29,12 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Caminhos
-DB_PATH = "data/portabilidade.db"
+# Caminhos - usar config.py centralizado
+try:
+    from config import DB_PATH
+except ImportError:
+    DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
+
 OUTPUT_HOMOLOGACAO = Path("data/homologacao_reabertura.xlsx")
 OUTPUT_TEMP = Path("data/homologacao_reabertura_temp.xlsx")
 # Base analítica agora vem do banco (base_coverte_prop) - não precisa mais de arquivo CSV

@@ -52,9 +52,9 @@ try:
     # Não precisa mais do arquivo CSV separado
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 except ImportError:
-    # Fallback se config.py não existir
-    DB_PATH = "data/portabilidade.db"
-    OUTPUT_HOMOLOGACAO = Path("data/homologacao_wpp.csv")
+    # Fallback se config.py não existir - usar caminho absoluto
+    DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
+    OUTPUT_HOMOLOGACAO = Path(__file__).parent / "data" / "homologacao_wpp.csv"
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 
 # Palavras a ignorar ao extrair primeiro e último nome
