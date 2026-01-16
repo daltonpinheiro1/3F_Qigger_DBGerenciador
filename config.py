@@ -1,156 +1,132 @@
 """
-Configurações centralizadas do projeto 3F Qigger DB Gerenciador
-
-Este arquivo contém todas as configurações de caminhos, conexões e parâmetros
-utilizados pelos scripts de processamento.
+Arquivo de configuração centralizado para 3F Qigger DB Gerenciador
+Ajustado para Mac - caminhos locais sem nuvem
 """
-
+import os
 from pathlib import Path
 
-# =============================================================================
-# DIRETÓRIOS DO PROJETO
-# =============================================================================
+# ========== CAMINHOS PRINCIPAIS (Mac) ==========
 
-PROJECT_ROOT = Path(__file__).parent
+# Caminho base do projeto (relativo ao arquivo config.py)
+PROJECT_ROOT = Path(__file__).parent.resolve()
+DATA_DIR = PROJECT_ROOT / "data"
 
-# Banco de dados
-DB_PATH = str(PROJECT_ROOT / "data" / "portabilidade.db")
+# Banco de dados - usar caminho absoluto no Mac
+DB_PATH = "/Applications/Documentos/Projetos_python/3F_Qigger_DBGerenciador/data/portabilidade.db"
 
-# Pastas de entrada/saída
-PASTA_ENTRADA = str(PROJECT_ROOT / "data" / "entrada")
-PASTA_SAIDA = str(PROJECT_ROOT / "data" / "saida")
-PASTA_LOGS = str(PROJECT_ROOT / "logs")
+# Pasta de importações (arquivos CSV e XLSX de objetos)
+PASTA_IMPORTACOES = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
 
-# Pasta de importações (arquivos externos)
-PASTA_IMPORTACOES = "/Applications/Documentos/IMPORTACOES_QIGGER"
+# Base COVERTE BASE PROP (Excel) - caminho de rede
+# No Mac, quando montado via SMB, fica em /Volumes
+# Caminho completo: /Volumes/02 Planejamento/02 - Relatórios/08 - Relatorios Cliente/COVERTE BASE PROP.xlsx
+# Esta é uma tabela separada (base_coverte_prop) - NÃO é a base_unificada
+# A base_unificada continua sendo para relatório de objetos e gerenciador
+PASTA_BASE_COVERTE_NETWORK = Path("/Volumes/02 Planejamento/02 - Relatórios/08 - Relatorios Cliente")
+ARQUIVO_BASE_COVERTE_NETWORK = Path("/Volumes/02 Planejamento/02 - Relatórios/08 - Relatorios Cliente/COVERTE BASE PROP.xlsx")
+PASTA_BASE_COVERTE_LOCAL = DATA_DIR / "entrada" / "excel"  # Fallback local
 
-# =============================================================================
-# CONFIGURAÇÃO SMB - COMPARTILHAMENTO DE REDE
-# =============================================================================
+# Triggers (regras de decisão)
+TRIGGERS_PATH = PROJECT_ROOT / "triggers.xlsx"
 
-# Servidor SMB
-SMB_SERVER = "files"
-SMB_SHARE = "02 Planejamento"
+# ========== PASTAS DE TRABALHO ==========
 
-# Caminho para o arquivo COVERTE BASE PROP no servidor
-SMB_COVERTE_PATH = "02 - Relatórios/08 - Relatorios Cliente"
-SMB_COVERTE_FILE = "COVERTE BASE PROP.xlsx"
+# Pastas de entrada e saída (usando caminho absoluto)
+PASTA_ENTRADA = DATA_DIR / "entrada"
+PASTA_PROCESSADOS = DATA_DIR / "processados"
+PASTA_ERROS = DATA_DIR / "erros"
+PASTA_RETORNOS = DATA_DIR / "retornos"
 
-# URL SMB completa (para referência)
-SMB_URL = f"smb://{SMB_SERVER}/{SMB_SHARE}/{SMB_COVERTE_PATH}/{SMB_COVERTE_FILE}"
+# Subpastas de retornos
+PASTA_RETORNOS_GOOGLE_DRIVE = PASTA_RETORNOS / "google_drive"
+PASTA_RETORNOS_BACKOFFICE = PASTA_RETORNOS / "backoffice"
 
-# Ponto de montagem no macOS (onde o volume aparece quando montado)
-SMB_MOUNT_POINT = f"/Volumes/{SMB_SHARE}"
+# Pasta de logs
+PASTA_LOGS = PROJECT_ROOT / "logs"
 
-# =============================================================================
-# CAMINHOS DERIVADOS (calculados a partir das configurações acima)
-# =============================================================================
+# ========== ARQUIVOS DE SAÍDA ==========
 
-# Caminho da pasta base na rede (quando montado)
-PASTA_BASE_COVERTE_NETWORK = f"{SMB_MOUNT_POINT}/{SMB_COVERTE_PATH}"
+# Arquivos de homologação (usando caminho absoluto)
+OUTPUT_WPP = DATA_DIR / "homologacao_wpp.csv"
+OUTPUT_APROVISIONAMENTOS = DATA_DIR / "homologacao_aprovisionamentos.csv"
+OUTPUT_IMPORTACAO = DATA_DIR / "importacao_final.csv"
+OUTPUT_REABERTURA = DATA_DIR / "homologacao_reabertura.csv"
 
-# Caminho completo do arquivo na rede (quando montado)
-ARQUIVO_BASE_COVERTE_NETWORK = f"{PASTA_BASE_COVERTE_NETWORK}/{SMB_COVERTE_FILE}"
+# WPP Output (Régua de Comunicação)
+WPP_OUTPUT_PATH = DATA_DIR / "WPP_Regua_Output.csv"
 
-# Caminho local para cópia do arquivo (fallback)
-PASTA_BASE_COVERTE_LOCAL = str(PROJECT_ROOT / "data" / "entrada" / "excel")
+# ========== CONFIGURAÇÕES DE PROCESSAMENTO ==========
 
-# =============================================================================
-# ARQUIVOS DE SAÍDA - HOMOLOGAÇÃO
-# =============================================================================
+# Deletar arquivo após processar? (True = deletar, False = manter)
+DELETE_AFTER_PROCESS = True
 
-# Pasta de saída para arquivos de homologação
-PASTA_SAIDA_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador")
-
-# Criar pasta de saída se não existir
-PASTA_SAIDA_HOMOLOGACAO.mkdir(parents=True, exist_ok=True)
-
-# Arquivos de saída (salvos na pasta de homologação)
-OUTPUT_WPP = str(PASTA_SAIDA_HOMOLOGACAO / "homologacao_wpp.csv")
-OUTPUT_REABERTURA = str(PASTA_SAIDA_HOMOLOGACAO / "homologacao_reabertura.xlsx")
-OUTPUT_APROVISIONAMENTOS = str(PASTA_SAIDA_HOMOLOGACAO / "homologacao_aprovisionamento.xlsx")
-OUTPUT_ERRO_APROVISIONAMENTO = str(PASTA_SAIDA_HOMOLOGACAO / "homologacao_erro_aprovisionamento.xlsx")
-
-# =============================================================================
-# CONFIGURAÇÃO DE PROCESSAMENTO
-# =============================================================================
-
-# Tamanho de lote para commits no banco
+# Tamanho do lote para processamento
 BATCH_SIZE = 100
 
-# Limite de registros para processamento (0 = sem limite)
-MAX_REGISTROS = 0
+# Monitorar subpastas recursivamente?
+RECURSIVE_MONITORING = True
 
-# Formatos de data suportados (ordem de tentativa)
-DATE_FORMATS = [
-    "%Y-%m-%d",
-    "%d/%m/%Y",
-    "%Y-%m-%dT%H:%M:%S",
-    "%Y-%m-%dT%H:%M:%S.%fZ",
-    "%d/%m/%Y %H:%M:%S",
-    "%d/%m/%Y %H:%M",
-    "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%d %H:%M",
-]
+# ========== CONFIGURAÇÕES DE LOG ==========
 
-# =============================================================================
-# CONFIGURAÇÃO DE LOGGING
-# =============================================================================
-
+# Nível de log (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 LOG_LEVEL = "INFO"
-LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-LOG_FILE_MAX_BYTES = 10 * 1024 * 1024  # 10MB
-LOG_FILE_BACKUP_COUNT = 5
 
-# =============================================================================
-# FUNÇÕES UTILITÁRIAS
-# =============================================================================
+# ========== FUNÇÃO PARA CARREGAR CONFIGURAÇÕES ==========
 
-def criar_diretorios():
-    """Cria os diretórios necessários se não existirem."""
-    diretorios = [
-        PASTA_ENTRADA,
-        PASTA_SAIDA,
-        PASTA_LOGS,
-        PASTA_BASE_COVERTE_LOCAL,
-    ]
-    
-    for diretorio in diretorios:
-        Path(diretorio).mkdir(parents=True, exist_ok=True)
-
-
-def verificar_conexao_rede() -> bool:
-    """Verifica se o compartilhamento de rede está acessível."""
-    return Path(SMB_MOUNT_POINT).exists() and Path(SMB_MOUNT_POINT).is_dir()
-
-
-def obter_arquivo_coverte() -> Path | None:
+def load_config():
     """
-    Obtém o caminho do arquivo COVERTE BASE PROP.
-    
-    Verifica primeiro na rede, depois localmente.
+    Carrega configurações do arquivo config.py ou variáveis de ambiente
     
     Returns:
-        Path do arquivo ou None se não encontrado
+        Dicionário com todas as configurações
     """
-    # Tentar rede primeiro
-    arquivo_rede = Path(ARQUIVO_BASE_COVERTE_NETWORK)
-    if arquivo_rede.exists():
-        return arquivo_rede
+    config = {
+        # Caminhos principais
+        'DB_PATH': os.getenv('QIGGER_DB_PATH', DB_PATH),
+        'PASTA_IMPORTACOES': os.getenv('QIGGER_PASTA_IMPORTACOES', str(PASTA_IMPORTACOES)),
+        'TRIGGERS_PATH': os.getenv('QIGGER_TRIGGERS_PATH', str(TRIGGERS_PATH)),
+        
+        # Pastas
+        'PASTA_ENTRADA': os.getenv('QIGGER_PASTA_ENTRADA', str(PASTA_ENTRADA)),
+        'PASTA_PROCESSADOS': os.getenv('QIGGER_PASTA_PROCESSADOS', str(PASTA_PROCESSADOS)),
+        'PASTA_ERROS': os.getenv('QIGGER_PASTA_ERROS', str(PASTA_ERROS)),
+        'PASTA_RETORNOS': os.getenv('QIGGER_PASTA_RETORNOS', str(PASTA_RETORNOS)),
+        'PASTA_LOGS': os.getenv('QIGGER_PASTA_LOGS', str(PASTA_LOGS)),
+        
+        # Arquivos de saída
+        'OUTPUT_WPP': os.getenv('QIGGER_OUTPUT_WPP', str(OUTPUT_WPP)),
+        'OUTPUT_APROVISIONAMENTOS': os.getenv('QIGGER_OUTPUT_APROV', str(OUTPUT_APROVISIONAMENTOS)),
+        'OUTPUT_IMPORTACAO': os.getenv('QIGGER_OUTPUT_IMPORT', str(OUTPUT_IMPORTACAO)),
+        'WPP_OUTPUT_PATH': os.getenv('QIGGER_WPP_OUTPUT', str(WPP_OUTPUT_PATH)),
+        
+        # Configurações de processamento
+        'DELETE_AFTER_PROCESS': os.getenv('QIGGER_DELETE_AFTER', str(DELETE_AFTER_PROCESS)).lower() == 'true',
+        'BATCH_SIZE': int(os.getenv('QIGGER_BATCH_SIZE', BATCH_SIZE)),
+        'RECURSIVE_MONITORING': os.getenv('QIGGER_RECURSIVE', str(RECURSIVE_MONITORING)).lower() == 'true',
+        
+        # Configurações de log
+        'LOG_LEVEL': os.getenv('QIGGER_LOG_LEVEL', LOG_LEVEL),
+    }
     
-    # Tentar local
-    pasta_local = Path(PASTA_BASE_COVERTE_LOCAL)
-    if pasta_local.exists():
-        arquivos = list(pasta_local.glob("COVERTE BASE PROP*.xlsx"))
-        if arquivos:
-            return max(arquivos, key=lambda x: x.stat().st_mtime)
+    return config
+
+
+def criar_pastas_necessarias():
+    """Cria todas as pastas necessárias se não existirem"""
+    pastas = [
+        PASTA_ENTRADA,
+        PASTA_PROCESSADOS,
+        PASTA_ERROS,
+        PASTA_RETORNOS,
+        PASTA_RETORNOS_GOOGLE_DRIVE,
+        PASTA_RETORNOS_BACKOFFICE,
+        PASTA_LOGS,
+    ]
     
-    return None
+    for pasta in pastas:
+        pasta.mkdir(parents=True, exist_ok=True)
 
 
-# =============================================================================
-# INICIALIZAÇÃO
-# =============================================================================
+# Criar pastas ao importar o módulo
+criar_pastas_necessarias()
 
-# Criar diretórios ao importar este módulo
-criar_diretorios()

@@ -2,7 +2,6 @@
 Script para gerar arquivo de homologação de Reabertura
 Filtra registros cancelados e agrupa por CPF
 """
-import sys
 from pathlib import Path
 from datetime import datetime
 
@@ -29,19 +28,10 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Caminhos - usar config.py centralizado
-try:
-    from config import DB_PATH, OUTPUT_REABERTURA, PASTA_SAIDA_HOMOLOGACAO
-    OUTPUT_HOMOLOGACAO = Path(OUTPUT_REABERTURA)
-    OUTPUT_TEMP = PASTA_SAIDA_HOMOLOGACAO / "homologacao_reabertura_temp.xlsx"
-except ImportError:
-    DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
-    OUTPUT_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_reabertura.xlsx")
-    OUTPUT_TEMP = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_reabertura_temp.xlsx")
-
-# Garantir que pasta de saída existe
-OUTPUT_HOMOLOGACAO.parent.mkdir(parents=True, exist_ok=True)
-
+# Caminhos
+DB_PATH = "data/portabilidade.db"
+OUTPUT_HOMOLOGACAO = Path("data/homologacao_reabertura.xlsx")
+OUTPUT_TEMP = Path("data/homologacao_reabertura_temp.xlsx")
 # Base analítica agora vem do banco (base_coverte_prop) - não precisa mais de arquivo CSV
 BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 
@@ -118,6 +108,7 @@ def main():
                 -- Dados adicionais de base_coverte_prop
                 bc.cliente_nome,
                 bc.telefone_portado,
+                bc.numero_linha,
                 bc.plano,
                 bc.crivo_vendas,
                 bc.bluechip_status,
@@ -184,6 +175,7 @@ def main():
                 NULL AS data_venda,
                 NULL AS cliente_nome,
                 NULL AS telefone_portado,
+                NULL AS numero_linha,
                 NULL AS plano,
                 NULL AS crivo_vendas,
                 NULL AS bluechip_status,
@@ -292,7 +284,7 @@ def main():
         results_map,
         output_path,
         base_analitica_loader,
-        db_manager  # Passar db_manager para buscar plano da base_coverte_prop
+        db_manager
     ):
         # Renomear para o arquivo final
         try:

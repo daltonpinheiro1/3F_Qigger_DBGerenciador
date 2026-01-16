@@ -181,13 +181,21 @@ def obter_arquivo_coverte_smb() -> Optional[Path]:
     Tenta montar automaticamente se não estiver montado.
     
     Returns:
-        Caminho do arquivo ou None se não encontrado
+        Caminho do arquivo (resolvido se era alias) ou None se não encontrado/inválido
     """
     # Verificar se já existe localmente na pasta de entrada
     arquivo_local = PASTA_ENTRADA_PATH / "COVERTE BASE PROP.xlsx"
-    if arquivo_local.exists() and validar_arquivo_excel(arquivo_local):
-        logger.info(f"✓ Usando arquivo local: {arquivo_local}")
-        return arquivo_local
+    if arquivo_local.exists():
+        # Resolver alias se for o caso
+        arquivo_resolvido = resolver_alias_macos(arquivo_local)
+        
+        if arquivo_resolvido is None:
+            logger.warning(f"⚠️ Arquivo local é alias quebrado: {arquivo_local}")
+        elif validar_arquivo_excel(arquivo_resolvido, resolver_alias=False):
+            logger.info(f"✓ Usando arquivo local: {arquivo_resolvido}")
+            return arquivo_resolvido
+        else:
+            logger.warning(f"⚠️ Arquivo local inválido ou corrompido: {arquivo_local}")
     
     # Tentar montar o compartilhamento SMB
     if not verificar_conexao_smb():
@@ -200,13 +208,17 @@ def obter_arquivo_coverte_smb() -> Optional[Path]:
     
     if arquivo_rede.exists():
         # Resolver alias se necessário
-        arquivo_rede = resolver_alias_macos(arquivo_rede)
+        arquivo_resolvido = resolver_alias_macos(arquivo_rede)
         
-        if validar_arquivo_excel(arquivo_rede):
-            logger.info(f"✓ Arquivo encontrado na rede: {arquivo_rede}")
-            return arquivo_rede
+        if arquivo_resolvido is None:
+            logger.warning(f"⚠️ Arquivo da rede é alias quebrado: {arquivo_rede}")
+            return None
+        
+        if validar_arquivo_excel(arquivo_resolvido, resolver_alias=False):
+            logger.info(f"✓ Arquivo encontrado na rede: {arquivo_resolvido}")
+            return arquivo_resolvido
         else:
-            logger.warning(f"⚠️ Arquivo na rede não é válido: {arquivo_rede}")
+            logger.warning(f"⚠️ Arquivo na rede não é válido: {arquivo_resolvido}")
     else:
         logger.warning(f"⚠️ Arquivo não encontrado na rede: {arquivo_rede}")
         
@@ -263,7 +275,7 @@ def copiar_arquivo_para_local(arquivo_origem: Path) -> Optional[Path]:
         return None
 
 
-def resolver_alias_macos(caminho: Path) -> Path:
+def resolver_alias_macos(caminho: Path) -> Optional[Path]:
     """
     Resolve aliases do macOS para o caminho real do arquivo.
     No macOS, arquivos podem ser aliases (atalhos) que apontam para outros locais.
@@ -272,7 +284,7 @@ def resolver_alias_macos(caminho: Path) -> Path:
         caminho: Caminho potencialmente um alias
         
     Returns:
-        Caminho real do arquivo ou o caminho original se não for alias
+        Caminho real do arquivo, ou None se o alias estiver quebrado
     """
     import subprocess
     import platform
@@ -282,6 +294,26 @@ def resolver_alias_macos(caminho: Path) -> Path:
     
     if not caminho.exists():
         return caminho
+    
+    # Verificar se é um alias usando o comando 'file'
+    try:
+        result = subprocess.run(
+            ['file', str(caminho)],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        is_alias = 'MacOS Alias' in result.stdout or 'alias' in result.stdout.lower()
+        
+        if not is_alias:
+            # Não é alias, retornar caminho original
+            return caminho
+            
+        logger.info(f"🔗 Detectado alias macOS: {caminho.name}")
+        
+    except Exception:
+        pass  # Continuar tentando resolver
     
     try:
         # Usar osascript para resolver alias do macOS
@@ -296,34 +328,56 @@ def resolver_alias_macos(caminho: Path) -> Path:
             ['osascript', '-e', script],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=10
         )
         
         if result.returncode == 0 and result.stdout.strip():
             caminho_real = Path(result.stdout.strip())
-            if caminho_real.exists() and caminho_real != caminho:
-                logger.info(f"Alias macOS resolvido: {caminho.name} -> {caminho_real}")
+            if caminho_real.exists():
+                if caminho_real != caminho:
+                    logger.info(f"✓ Alias resolvido: {caminho.name} -> {caminho_real}")
                 return caminho_real
+            else:
+                logger.warning(f"⚠️ Alias aponta para arquivo inexistente: {caminho_real}")
+                return None
+        else:
+            # osascript falhou - provavelmente alias quebrado
+            logger.warning(f"⚠️ Não foi possível resolver alias: {caminho.name}")
+            if result.stderr:
+                logger.debug(f"Erro osascript: {result.stderr.strip()}")
+            return None
+                
     except subprocess.TimeoutExpired:
-        logger.debug(f"Timeout ao resolver alias: {caminho}")
+        logger.warning(f"Timeout ao resolver alias: {caminho}")
+        return None
     except Exception as e:
-        logger.debug(f"Arquivo não é alias ou erro ao resolver: {e}")
-    
-    return caminho
+        logger.debug(f"Erro ao resolver alias: {e}")
+        return None
 
 
-def validar_arquivo_excel(caminho: Path) -> bool:
+def validar_arquivo_excel(caminho: Path, resolver_alias: bool = True) -> bool:
     """
     Valida se o arquivo é um Excel válido (não é alias corrompido ou arquivo vazio).
     
     Args:
         caminho: Caminho do arquivo
+        resolver_alias: Se True, tenta resolver alias do macOS antes de validar
         
     Returns:
         True se arquivo parece válido
     """
     if not caminho.exists():
         return False
+    
+    # Resolver alias do macOS se necessário
+    if resolver_alias:
+        caminho_resolvido = resolver_alias_macos(caminho)
+        if caminho_resolvido is None:
+            logger.warning(f"Alias macOS quebrado ou destino inexistente: {caminho}")
+            return False
+        if caminho_resolvido != caminho:
+            # É um alias, validar o arquivo real
+            caminho = caminho_resolvido
     
     # Verificar tamanho mínimo (Excel vazio tem pelo menos alguns KB)
     tamanho = caminho.stat().st_size
@@ -1048,6 +1102,9 @@ def encontrar_arquivo_excel(pasta: Path) -> Optional[Path]:
     """
     Encontra o arquivo Excel mais recente na pasta.
     Valida arquivos e resolve aliases do macOS.
+    
+    Returns:
+        Caminho do arquivo Excel válido (resolvido se era alias) ou None
     """
     arquivos = list(pasta.glob("*.xlsx")) + list(pasta.glob("*.xls"))
     if not arquivos:
@@ -1055,10 +1112,25 @@ def encontrar_arquivo_excel(pasta: Path) -> Optional[Path]:
     
     # Filtrar arquivos válidos (resolver aliases e validar)
     arquivos_validos = []
+    aliases_quebrados = []
+    
     for arq in arquivos:
+        # Resolver alias primeiro
         arq_resolvido = resolver_alias_macos(arq)
-        if validar_arquivo_excel(arq_resolvido):
+        
+        if arq_resolvido is None:
+            # Alias quebrado
+            aliases_quebrados.append(arq)
+            continue
+            
+        # Validar arquivo resolvido (sem tentar resolver novamente)
+        if validar_arquivo_excel(arq_resolvido, resolver_alias=False):
             arquivos_validos.append(arq_resolvido)
+    
+    if aliases_quebrados:
+        logger.warning(f"⚠️ {len(aliases_quebrados)} alias(es) quebrado(s) encontrado(s) em {pasta}:")
+        for alias in aliases_quebrados:
+            logger.warning(f"   - {alias.name}")
     
     if not arquivos_validos:
         logger.warning(f"Nenhum arquivo Excel válido encontrado em: {pasta}")

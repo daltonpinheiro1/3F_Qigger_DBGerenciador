@@ -560,10 +560,41 @@ Exemplos:
     
     # Processar bases (se não for apenas homologação)
     if not args.apenas_homologacao:
-        # 1. Excel COVERTE BASE PROP
+        # 1. Excel COVERTE BASE PROP (OBRIGATÓRIO para continuar)
         if not args.skip_excel:
             usar_smb = args.smb and not args.no_smb
             stats_geral['excel'] = processar_excel_coverte_prop(usar_smb=usar_smb)
+            
+            # VERIFICAR SE EXCEL FOI PROCESSADO - SE NÃO, INTERROMPER!
+            if not stats_geral['excel'].get('sucesso'):
+                print("")
+                print("=" * 70)
+                print("❌ PROCESSAMENTO INTERROMPIDO")
+                print("=" * 70)
+                print("")
+                print("O arquivo COVERTE BASE PROP.xlsx é OBRIGATÓRIO para continuar.")
+                print("Sem ele, não é possível processar as demais etapas.")
+                print("")
+                print("💡 SOLUÇÕES:")
+                print("")
+                print("1. Monte o compartilhamento SMB manualmente:")
+                print("   - Finder > Cmd+K (Conectar ao Servidor)")
+                print("   - Digite: smb://files/02 Planejamento")
+                print("   - Navegue até: 02 - Relatórios/08 - Relatorios Cliente/")
+                print("")
+                print("2. Copie o arquivo COVERTE BASE PROP.xlsx para uma das pastas:")
+                print(f"   - {pasta_coverte_local}")
+                print(f"   - {pasta_entrada}")
+                print("")
+                print("3. Se o arquivo em data/entrada é um ALIAS do macOS:")
+                print("   - Delete o alias e copie o arquivo REAL")
+                print("   - Ou crie um symlink em vez de alias")
+                print("")
+                print("4. Para pular o Excel e processar apenas outros arquivos:")
+                print("   python3 processar_completo.py --skip-excel")
+                print("")
+                logger.error("Processamento interrompido: COVERTE BASE PROP.xlsx não encontrado ou inválido")
+                sys.exit(1)
         else:
             logger.info("⏭️ Pulando processamento do Excel (--skip-excel)")
             logger.info("")
