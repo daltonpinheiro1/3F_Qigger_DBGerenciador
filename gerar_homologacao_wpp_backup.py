@@ -1,19 +1,10 @@
 """
 Script para gerar arquivo de homologação WPP
 Mostra como os dados serão enviados ao WhatsApp sem fazer o envio real
-
-REGRAS DE NEGÓCIO:
-- Apenas clientes com crivo_vendas = "APROVADA" recebem mensagens
-- Coluna Numero deve conter apenas números (letras vão para Complemento)
-- Verificação de histórico para controle de tentativas
-- Se já enviou nas últimas 24h, não envia novamente
-- Se já tem template 1, retorna template 2
-- Máximo 5 tentativas de templates 1 ou 2, depois sai da fila
 """
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
-import re
+from datetime import datetime
 
 # Configurar encoding UTF-8
 from src.utils.console_utils import setup_windows_console
@@ -77,86 +68,6 @@ PALAVRAS_IGNORAR = {'e', 'de', 'da', 'do', 'das', 'dos', 'em', 'na', 'no', 'nas'
 GOOGLE_SHEET_ID = '13qXylcL-wYbB4vDouI4d2rRazYQvaPEZneEmLx-lVtk'
 GOOGLE_SHEET_EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv'
 MAX_ENVIOS_POR_CLIENTE = 5  # Máximo de envios tipo 1 ou 2 antes de bloquear
-
-# =============================================================================
-# CONFIGURAÇÃO DE CONTROLE DE ENVIOS
-# =============================================================================
-MAX_TENTATIVAS_TEMPLATE = 5  # Máximo de tentativas por template 1 ou 2
-HORAS_ENTRE_ENVIOS = 24  # Horas mínimas entre envios para o mesmo cliente
-
-# =============================================================================
-# ARQUIVO DE IDs PARA FORÇAR INCLUSÃO NO WPP
-# =============================================================================
-IDS_FORCAR_WPP_PATH = Path(__file__).parent / "data" / "ids_forcar_wpp.txt"
-
-
-def carregar_ids_forcar_wpp() -> set:
-    """
-    Carrega lista de IDs (proposta_isize) que devem ser forçados no disparo WPP.
-    O arquivo deve ter um ID por linha. Linhas começando com # são ignoradas.
-    
-    Returns:
-        Set de IDs (strings) para forçar inclusão
-    """
-    ids_forcar = set()
-    
-    if not IDS_FORCAR_WPP_PATH.exists():
-        logger.info(f"[IDS_FORCAR] Arquivo não encontrado: {IDS_FORCAR_WPP_PATH}")
-        return ids_forcar
-    
-    try:
-        with open(IDS_FORCAR_WPP_PATH, 'r', encoding='utf-8') as f:
-            for linha in f:
-                linha = linha.strip()
-                # Ignorar linhas vazias e comentários
-                if not linha or linha.startswith('#'):
-                    continue
-                # Extrair apenas números (remover espaços e vírgulas)
-                id_limpo = ''.join(filter(str.isdigit, linha))
-                if id_limpo:
-                    ids_forcar.add(id_limpo)
-        
-        logger.info(f"[IDS_FORCAR] {len(ids_forcar)} IDs carregados de {IDS_FORCAR_WPP_PATH.name}")
-    except Exception as e:
-        logger.error(f"[IDS_FORCAR] Erro ao carregar arquivo: {e}")
-    
-    return ids_forcar
-
-
-def extrair_numero_e_complemento(numero_original: str, complemento_original: str = "") -> tuple:
-    """
-    Extrai apenas números do campo Numero e move letras/texto para Complemento.
-    
-    Args:
-        numero_original: Valor original do campo Numero (pode conter letras)
-        complemento_original: Valor original do campo Complemento
-        
-    Returns:
-        Tupla (numero_limpo, complemento_atualizado)
-    """
-    if not numero_original:
-        return "", complemento_original or ""
-    
-    numero_str = str(numero_original).strip()
-    
-    # Extrair apenas dígitos do número
-    apenas_numeros = ''.join(filter(str.isdigit, numero_str))
-    
-    # Extrair parte não-numérica (letras e caracteres especiais)
-    parte_texto = re.sub(r'[\d\s]+', ' ', numero_str).strip()
-    
-    # Se houver parte texto, adicionar ao complemento
-    if parte_texto:
-        complemento_atualizado = complemento_original or ""
-        if complemento_atualizado:
-            # Evitar duplicação
-            if parte_texto.lower() not in complemento_atualizado.lower():
-                complemento_atualizado = f"{parte_texto} {complemento_atualizado}".strip()
-        else:
-            complemento_atualizado = parte_texto
-        return apenas_numeros or "0", complemento_atualizado
-    
-    return apenas_numeros or numero_str, complemento_original or ""
 
 
 def carregar_historico_envios_gsheet() -> pd.DataFrame:
@@ -856,14 +767,6 @@ def gerar_arquivo_homologacao():
     print("[1] Conectando ao banco de dados...")
     db_manager = DatabaseManager(DB_PATH)
     
-    # 1.1 Carregar IDs para forçar inclusão no WPP
-    print("[1.1] Carregando IDs para forçar inclusão no WPP...")
-    ids_forcar_wpp = carregar_ids_forcar_wpp()
-    if ids_forcar_wpp:
-        print(f"    >> {len(ids_forcar_wpp)} IDs carregados para forçar inclusão")
-    else:
-        print("    >> Nenhum ID para forçar (arquivo vazio ou não encontrado)")
-    
     # 2. Buscar registros com template sincronizando todas as tabelas do portabilidade.db
     print("[2] Buscando registros com template mapeado (sincronizando todas as tabelas)...")
     
@@ -883,7 +786,6 @@ def gerar_arquivo_homologacao():
         
         # Buscar registros ÚNICOS por codigo_externo, priorizando base_coverte_prop como fonte principal
         # Remove duplicados usando GROUP BY garantindo um único registro por codigo_externo
-        # FILTRO: Apenas clientes com crivo_vendas = "APROVADA"
         if tem_base_coverte:
             query = """
             SELECT 
@@ -914,22 +816,17 @@ def gerar_arquivo_homologacao():
                 MAX(bc.uf) AS uf,
                 MAX(bc.cep) AS cep,
                 MAX(bc.ponto_referencia) AS ponto_referencia,
-                MAX(bc.crivo_vendas) AS crivo_vendas,
                 
                 -- Dados de logística (relatorio_objetos)
                 """ + ("""
                 MAX(ro.nu_pedido) AS nu_pedido,
                 MAX(ro.rastreio) AS rastreio,
-                MAX(ro.status) AS ro_status,
+                MAX(ro.status) AS ro_status
                 """ if tem_relatorio_objetos else """
                 NULL AS nu_pedido,
                 NULL AS rastreio,
-                NULL AS ro_status,
+                NULL AS ro_status
                 """) + """
-                
-                -- Contadores para controle de duplicação/reclassificação
-                COUNT(DISTINCT pr.id) AS total_classificacoes,
-                CASE WHEN COUNT(DISTINCT pr.id) > 1 THEN 'SIM' ELSE 'NAO' END AS houve_reclassificacao
                 
             FROM base_coverte_prop bc
             LEFT JOIN portabilidade_records pr ON (
@@ -944,59 +841,29 @@ def gerar_arquivo_homologacao():
             """ if tem_relatorio_objetos else "") + """
             WHERE bc.proposta_isize IS NOT NULL 
               AND TRIM(COALESCE(bc.proposta_isize, bc.codigo_externo, '')) != ''
-              AND (
-                  -- Registros normais: crivo_vendas = APROVADA com template
-                  (
-                      UPPER(TRIM(COALESCE(CAST(bc.crivo_vendas AS TEXT), ''))) = 'APROVADA'
-                      AND (pr.template IS NOT NULL OR bc.data_venda >= '2026-01-01')
-                  )
-                  """ + (f"""
-                  -- IDs forçados: incluir independente de crivo_vendas ou template
-                  OR TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) IN ({','.join([repr(id) for id in ids_forcar_wpp])})
-                  """ if ids_forcar_wpp else "") + """
-              )
+              AND (pr.template IS NOT NULL OR bc.data_venda >= '2026-01-01')
             GROUP BY COALESCE(bc.proposta_isize, bc.codigo_externo, pr.codigo_externo""" + (", ro.codigo_externo" if tem_relatorio_objetos else "") + """, '')
             ORDER BY MAX(bc.data_venda) DESC NULLS LAST
-            LIMIT 10000
+            LIMIT 5000
             """
         else:
-            # Fallback: usar apenas portabilidade_records (com deduplicação)
+            # Fallback: usar apenas portabilidade_records
             query = """
-            SELECT 
-                MAX(id) AS id, 
-                MAX(cpf) AS cpf, 
-                MAX(numero_acesso) AS numero_acesso, 
-                MAX(numero_ordem) AS numero_ordem, 
-                codigo_externo,
-                MAX(tipo_mensagem) AS tipo_mensagem, 
-                MAX(template) AS template, 
-                MAX(regra_id) AS regra_id, 
-                MAX(o_que_aconteceu) AS o_que_aconteceu, 
-                MAX(acao_a_realizar) AS acao_a_realizar,
+            SELECT DISTINCT
+                id, cpf, numero_acesso, numero_ordem, codigo_externo,
+                tipo_mensagem, template, regra_id, o_que_aconteceu, acao_a_realizar,
                 NULL AS cliente_nome,
                 NULL AS telefone_portado,
                 NULL AS data_venda,
                 NULL AS plano,
-                NULL AS endereco,
-                NULL AS numero,
-                NULL AS complemento,
-                NULL AS bairro,
-                NULL AS cidade,
-                NULL AS uf,
-                NULL AS cep,
-                NULL AS ponto_referencia,
-                NULL AS crivo_vendas,
                 NULL AS ro_nu_pedido,
                 NULL AS ro_rastreio,
-                NULL AS ro_status,
-                COUNT(*) AS total_classificacoes,
-                CASE WHEN COUNT(*) > 1 THEN 'SIM' ELSE 'NAO' END AS houve_reclassificacao
+                NULL AS ro_status
             FROM portabilidade_records
             WHERE template IS NOT NULL 
               AND template != ''
               AND template != '-'
               AND mapeado = 1
-            GROUP BY codigo_externo
             ORDER BY id DESC
             LIMIT 1000
             """
@@ -1590,34 +1457,12 @@ def gerar_arquivo_homologacao():
             
             tipo_comunicacao = str(tipo_comunicacao_ajustado)
         
-        # Extrair contagens e flags de reclassificação da query
-        total_classificacoes = row_dict.get('total_classificacoes', 1)
-        try:
-            total_classificacoes = int(total_classificacoes) if total_classificacoes else 1
-        except (ValueError, TypeError):
-            total_classificacoes = 1
-        
-        houve_reclassificacao = row_dict.get('houve_reclassificacao', 'NAO')
-        if not houve_reclassificacao or houve_reclassificacao == 'NAO':
-            houve_reclassificacao = 'NAO'
-        else:
-            houve_reclassificacao = 'SIM'
-        
-        # Contagem de tentativas (baseado no histórico de envios)
-        tentativas = 0
-        if not historico_envios_df.empty and record.codigo_externo:
-            # Contar quantas vezes este cliente já recebeu mensagens
-            mask = (
-                (historico_envios_df.get('proposta_isize', pd.Series()).astype(str).str.strip() == str(record.codigo_externo).strip()) |
-                (historico_envios_df.get('cpf', pd.Series()).astype(str).str.strip() == str(record.cpf).strip())
-            )
-            tentativas = mask.sum() if hasattr(mask, 'sum') else 0
-        
         # Ordem IMUTÁVEL das colunas principais (conforme especificado para Google Sheets)
         row_data = {
             'Proposta_iSize': record.codigo_externo or '',
             'Cpf': record.cpf or '',
             'NomeCliente': nome_cliente_formatado,
+            '_vazia': '',  # Coluna vazia após NomeCliente
             'Telefone_Contato': telefone_contato,
             'Endereco': endereco_data['endereco'] or '',
             'Numero': endereco_data['numero'] or '',
@@ -1630,9 +1475,6 @@ def gerar_arquivo_homologacao():
             'Cod_Rastreio': link_rastreio or '',
             'Data_Venda': data_venda_formatada,
             'Tipo_Comunicacao': tipo_comunicacao,
-            'Tentativas': tentativas,
-            'Total_Classificacoes': total_classificacoes,
-            'Houve_Reclassificacao': houve_reclassificacao,
             'Status_Disparo': 'FALSE',  # Sempre FALSE
             'DataHora_Disparo': '',  # Sempre vazio
         }
@@ -1666,13 +1508,11 @@ def gerar_arquivo_homologacao():
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         if homologacao_data:
             # Ordem IMUTÁVEL das colunas principais (para Google Sheets)
-            # Removida coluna vazia após NomeCliente (conforme solicitado)
+            # Coluna vazia após NomeCliente (usando chave especial que será escrita como vazia)
             colunas_principais = [
-                'Proposta_iSize', 'Cpf', 'NomeCliente', 'Telefone_Contato',
+                'Proposta_iSize', 'Cpf', 'NomeCliente', '_vazia', 'Telefone_Contato',
                 'Endereco', 'Numero', 'Complemento', 'Bairro', 'Cidade', 'UF', 'Cep', 'Ponto_Referencia',
-                'Cod_Rastreio', 'Data_Venda', 'Tipo_Comunicacao', 
-                'Tentativas', 'Total_Classificacoes', 'Houve_Reclassificacao',
-                'Status_Disparo', 'DataHora_Disparo'
+                'Cod_Rastreio', 'Data_Venda', 'Tipo_Comunicacao', 'Status_Disparo', 'DataHora_Disparo'
             ]
             
             # Colunas apenas para homologação (não se aplica à produção) - adicionadas no final
@@ -1682,15 +1522,23 @@ def gerar_arquivo_homologacao():
                 'Acao_Realizar'
             ]
             
-            # Ordem completa
+            # Ordem completa (substituir '_vazia' por string vazia no cabeçalho)
             fieldnames = colunas_principais + colunas_homologacao
             
-            # Escrever cabeçalho
-            f.write(';'.join(fieldnames) + '\n')
+            # Escrever cabeçalho manualmente para ter coluna vazia
+            header_values = []
+            for field in fieldnames:
+                if field == '_vazia':
+                    header_values.append('')  # Coluna vazia no cabeçalho
+                else:
+                    header_values.append(field)
+            f.write(';'.join(header_values) + '\n')
             
             # Escrever dados
             writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=';', extrasaction='ignore')
             for row in homologacao_data:
+                # Garantir que _vazia está sempre vazia
+                row['_vazia'] = ''
                 writer.writerow(row)
     
     print(f"    >> Arquivo salvo em: {output_path}")
