@@ -353,7 +353,7 @@ def resolver_alias_macos(caminho: Path) -> Optional[Path]:
     except Exception as e:
         logger.debug(f"Erro ao resolver alias: {e}")
         return None
-
+    
 
 def validar_arquivo_excel(caminho: Path, resolver_alias: bool = True) -> bool:
     """

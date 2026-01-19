@@ -63,9 +63,36 @@ def main():
             print("    >> Tabela base_coverte_prop não encontrada, usando apenas portabilidade_records")
         
         # Query sincronizada usando todas as tabelas disponíveis: base_coverte_prop + portabilidade_records + relatorio_objetos
+        # USANDO APENAS O REGISTRO MAIS RECENTE POR codigo_externo (evitar duplicatas)
         if tem_base_coverte:
             query = """
-            SELECT DISTINCT
+            WITH registros_mais_recentes AS (
+                -- Subquery para pegar apenas o registro mais recente por codigo_externo
+                SELECT 
+                    codigo_externo,
+                    MAX(id) as max_id,
+                    COUNT(*) as total_classificacoes
+                FROM portabilidade_records
+                WHERE (
+                    status_bilhete = 'Portabilidade Cancelada'
+                    OR (motivo_cancelamento IS NOT NULL AND motivo_cancelamento != '' AND motivo_cancelamento != 'NULL')
+                )
+                GROUP BY codigo_externo
+            ),
+            -- Subquery para pegar o novo_status_bilhete mais recente não-nulo
+            ultimo_status_bilhete AS (
+                SELECT 
+                    pr.codigo_externo,
+                    pr.novo_status_bilhete as ultimo_novo_status_bilhete
+                FROM portabilidade_records pr
+                INNER JOIN (
+                    SELECT codigo_externo, MAX(id) as max_id
+                    FROM portabilidade_records
+                    WHERE novo_status_bilhete IS NOT NULL AND novo_status_bilhete != ''
+                    GROUP BY codigo_externo
+                ) ultimo ON pr.codigo_externo = ultimo.codigo_externo AND pr.id = ultimo.max_id
+            )
+            SELECT 
                 -- CPF com fallback: base_coverte_prop > portabilidade_records > relatorio_objetos
                 COALESCE(
                     NULLIF(TRIM(CAST(bc.cpf AS TEXT)), ''),
@@ -89,10 +116,13 @@ def main():
                     ''
                 ) AS codigo_externo,
                 
-                -- Status de portabilidade (portabilidade_records)
+                -- Status de portabilidade (portabilidade_records) - usar o mais recente
                 COALESCE(pr.status_bilhete, '') AS status_bilhete,
                 COALESCE(pr.status_ordem, '') AS status_ordem,
                 COALESCE(pr.operadora_doadora, '') AS operadora_doadora,
+                
+                -- novo_status_bilhete - usar o mais recente não-nulo
+                COALESCE(usb.ultimo_novo_status_bilhete, pr.novo_status_bilhete, '') AS novo_status_bilhete,
                 
                 -- Datas
                 COALESCE(pr.data_portabilidade, '') AS data_portabilidade,
@@ -117,10 +147,18 @@ def main():
                 ro.nu_pedido AS ro_nu_pedido,
                 ro.rastreio AS ro_rastreio,
                 ro.status AS ro_status_entrega,
-                ro.transportadora AS ro_transportadora
+                ro.transportadora AS ro_transportadora,
                 
-            FROM base_coverte_prop bc
-            LEFT JOIN portabilidade_records pr ON (
+                -- Contadores de classificação
+                rmr.total_classificacoes,
+                CASE WHEN rmr.total_classificacoes > 1 THEN 'SIM' ELSE 'NAO' END AS houve_reclassificacao
+                
+            FROM portabilidade_records pr
+            INNER JOIN registros_mais_recentes rmr ON (
+                pr.codigo_externo = rmr.codigo_externo AND pr.id = rmr.max_id
+            )
+            LEFT JOIN ultimo_status_bilhete usb ON pr.codigo_externo = usb.codigo_externo
+            LEFT JOIN base_coverte_prop bc ON (
                 TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) = 
                 TRIM(COALESCE(CAST(pr.codigo_externo AS TEXT), ''))
             )

@@ -5,7 +5,7 @@ Mostra como os dados serão enviados ao WhatsApp sem fazer o envio real
 REGRAS DE NEGÓCIO:
 - Apenas clientes com crivo_vendas = "APROVADA" recebem mensagens
 - Coluna Numero deve conter apenas números (letras vão para Complemento)
-- Verificação no Google Sheets para controle de tentativas
+- Verificação de histórico para controle de tentativas
 - Se já enviou nas últimas 24h, não envia novamente
 - Se já tem template 1, retorna template 2
 - Máximo 5 tentativas de templates 1 ou 2, depois sai da fila
@@ -22,7 +22,6 @@ setup_windows_console()
 import logging
 import io
 import csv
-import json
 
 # Configurar logging
 Path('logs').mkdir(exist_ok=True)
@@ -55,28 +54,35 @@ import pandas as pd
 
 # Caminhos (usar config centralizado)
 try:
-    from config import DB_PATH, OUTPUT_WPP
-    DB_PATH = DB_PATH
+    from config import DB_PATH, OUTPUT_WPP, PASTA_SAIDA_HOMOLOGACAO
     OUTPUT_HOMOLOGACAO = Path(OUTPUT_WPP)
     # Base analítica agora vem do banco unificado (base_unificada) ou Excel processado
     # Não precisa mais do arquivo CSV separado
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 except ImportError:
-    # Fallback se config.py não existir
-    DB_PATH = "data/portabilidade.db"
-    OUTPUT_HOMOLOGACAO = Path("data/homologacao_wpp.csv")
+    # Fallback se config.py não existir - usar caminho absoluto
+    DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
+    OUTPUT_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_wpp.csv")
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 
-# Configuração do Google Sheets para controle de disparos
-GSHEET_ID = "13qXylcL-wYbB4vDouI4d2rRazYQvaPEZneEmLx-lVtk"
-GSHEET_PATH = Path("/Users/mac/Library/CloudStorage/GoogleDrive-dspinheiro31@gmail.com/.shortcut-targets-by-id/1Go5-kLQhwQ1l2nZpQGVQg_gNi2l-fsES/Portabilidade TIM - Régua de Comunicação")
+# Garantir que pasta de saída existe
+OUTPUT_HOMOLOGACAO.parent.mkdir(parents=True, exist_ok=True)
 
 # Palavras a ignorar ao extrair primeiro e último nome
 PALAVRAS_IGNORAR = {'e', 'de', 'da', 'do', 'das', 'dos', 'em', 'na', 'no', 'nas', 'nos'}
 
-# Limite de tentativas por template
-MAX_TENTATIVAS_TEMPLATE = 5
-HORAS_ENTRE_ENVIOS = 24
+# =============================================================================
+# CONFIGURAÇÃO DO GOOGLE SHEETS - HISTÓRICO DE ENVIOS
+# =============================================================================
+GOOGLE_SHEET_ID = '13qXylcL-wYbB4vDouI4d2rRazYQvaPEZneEmLx-lVtk'
+GOOGLE_SHEET_EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv'
+MAX_ENVIOS_POR_CLIENTE = 5  # Máximo de envios tipo 1 ou 2 antes de bloquear
+
+# =============================================================================
+# CONFIGURAÇÃO DE CONTROLE DE ENVIOS
+# =============================================================================
+MAX_TENTATIVAS_TEMPLATE = 5  # Máximo de tentativas por template 1 ou 2
+HORAS_ENTRE_ENVIOS = 24  # Horas mínimas entre envios para o mesmo cliente
 
 
 def extrair_numero_e_complemento(numero_original: str, complemento_original: str = "") -> tuple:
@@ -115,173 +121,154 @@ def extrair_numero_e_complemento(numero_original: str, complemento_original: str
     return apenas_numeros or numero_str, complemento_original or ""
 
 
-def carregar_historico_gsheets() -> dict:
+def carregar_historico_envios_gsheet() -> pd.DataFrame:
     """
-    Carrega histórico de disparos do Google Sheets.
-    Retorna dicionário com {proposta_isize: {template, data_disparo, tentativas}}
-    """
-    historico = {}
+    Carrega o histórico de envios do Google Sheets compartilhado na nuvem.
     
+    Returns:
+        DataFrame com histórico de envios ou DataFrame vazio se falhar
+    """
     try:
-        # Tentar usar gspread se disponível
-        try:
-            import gspread
-            from google.oauth2.service_account import Credentials
-            
-            # Verificar se há credenciais configuradas
-            creds_path = Path.home() / ".config" / "gspread" / "service_account.json"
-            if not creds_path.exists():
-                creds_path = Path(__file__).parent / "credentials" / "service_account.json"
-            
-            if creds_path.exists():
-                scopes = [
-                    'https://www.googleapis.com/auth/spreadsheets',
-                    'https://www.googleapis.com/auth/drive'
-                ]
-                creds = Credentials.from_service_account_file(str(creds_path), scopes=scopes)
-                gc = gspread.authorize(creds)
-                
-                # Abrir planilha
-                sh = gc.open_by_key(GSHEET_ID)
-                worksheet = sh.sheet1
-                
-                # Obter todos os dados
-                records = worksheet.get_all_records()
-                
-                for row in records:
-                    proposta = str(row.get('Proposta_iSize', '')).strip()
-                    if proposta:
-                        template = str(row.get('Tipo_Comunicacao', '')).strip()
-                        status = str(row.get('Status_Disparo', '')).strip().upper()
-                        data_str = str(row.get('DataHora_Disparo', '')).strip()
-                        tentativas = int(row.get('Tentativas', 0) or 0)
-                        
-                        # Parsear data do disparo
-                        data_disparo = None
-                        if data_str:
-                            for fmt in ['%d/%m/%Y %H:%M:%S', '%d/%m/%Y %H:%M', '%d/%m/%Y', '%Y-%m-%d %H:%M:%S']:
-                                try:
-                                    data_disparo = datetime.strptime(data_str, fmt)
-                                    break
-                                except ValueError:
-                                    continue
-                        
-                        if proposta not in historico:
-                            historico[proposta] = {
-                                'template': template,
-                                'data_disparo': data_disparo,
-                                'tentativas': tentativas,
-                                'status': status
-                            }
-                        else:
-                            # Atualizar se encontrar registro mais recente
-                            if data_disparo and (not historico[proposta]['data_disparo'] or 
-                                                 data_disparo > historico[proposta]['data_disparo']):
-                                historico[proposta]['data_disparo'] = data_disparo
-                                historico[proposta]['template'] = template
-                            historico[proposta]['tentativas'] = max(historico[proposta]['tentativas'], tentativas)
-                
-                logger.info(f"✓ Histórico carregado do Google Sheets: {len(historico)} registros")
-                return historico
-                
-        except ImportError:
-            logger.warning("gspread não instalado, tentando método alternativo...")
-        except Exception as e:
-            logger.warning(f"Erro ao acessar Google Sheets via API: {e}")
+        import requests
+        from io import StringIO
         
-        # Método alternativo: carregar do banco local (tabela disparos_wpp)
-        logger.info("Usando histórico do banco de dados local...")
+        logger.info("[GSHEET] Carregando histórico de envios do Google Sheets...")
         
+        response = requests.get(GOOGLE_SHEET_EXPORT_URL, timeout=30)
+        
+        if response.status_code == 200 and 'text/csv' in response.headers.get('content-type', ''):
+            df = pd.read_csv(StringIO(response.text), dtype=str)
+            logger.info(f"[GSHEET] ✅ {len(df)} registros carregados do histórico")
+            return df
+        else:
+            logger.warning(f"[GSHEET] ⚠️ Não foi possível acessar Google Sheets (status: {response.status_code})")
+            return pd.DataFrame()
+            
+    except ImportError:
+        logger.warning("[GSHEET] ⚠️ Módulo 'requests' não instalado. Histórico não será verificado.")
+        return pd.DataFrame()
     except Exception as e:
-        logger.warning(f"Erro ao carregar histórico: {e}")
-    
-    return historico
+        logger.error(f"[GSHEET] ❌ Erro ao carregar histórico: {e}")
+        return pd.DataFrame()
 
 
-def verificar_pode_enviar(proposta_isize: str, template_atual: str, historico: dict, db_manager) -> tuple:
+def verificar_historico_cliente(
+    proposta_isize: str, 
+    cpf: str, 
+    tipo_comunicacao_novo: int,
+    historico_df: pd.DataFrame
+) -> int:
     """
-    Verifica se pode enviar mensagem para o cliente baseado nas regras:
-    - Se já enviou nas últimas 24h, não envia
-    - Se já tem template 1, retorna template 2
-    - Se tem 5 tentativas de templates 1 ou 2, não entra mais na fila
+    Verifica o histórico de envios de um cliente e determina o Tipo_Comunicacao correto.
+    
+    Regras:
+    1. Se último Tipo_Comunicacao = 1 e novo = 1 → retorna 2
+    2. Se total de envios com tipo 1 ou 2 >= 5 → retorna 0 (não enviar)
+    3. Caso contrário, mantém o tipo original
     
     Args:
         proposta_isize: Código da proposta
-        template_atual: Template sugerido pelo sistema
-        historico: Histórico de disparos do Google Sheets
-        db_manager: Gerenciador do banco de dados
+        cpf: CPF do cliente
+        tipo_comunicacao_novo: Tipo de comunicação da nova atualização
+        historico_df: DataFrame com histórico de envios
         
     Returns:
-        Tupla (pode_enviar: bool, template_final: str, tentativas: int, motivo: str)
+        Tipo de comunicação ajustado (0, 1 ou 2)
     """
-    tentativas = 0
-    agora = datetime.now()
+    if historico_df.empty:
+        return tipo_comunicacao_novo
     
-    # Verificar no histórico do Google Sheets
-    if proposta_isize in historico:
-        info = historico[proposta_isize]
-        tentativas = info.get('tentativas', 0)
-        ultimo_template = info.get('template', '')
-        data_ultimo = info.get('data_disparo')
-        
-        # Regra 1: Se tem 5+ tentativas de template 1 ou 2, não envia mais
-        if tentativas >= MAX_TENTATIVAS_TEMPLATE and ultimo_template in ['1', '2']:
-            return False, template_atual, tentativas, f"Limite de {MAX_TENTATIVAS_TEMPLATE} tentativas atingido"
-        
-        # Regra 2: Se já enviou nas últimas 24h, não envia
-        if data_ultimo:
-            horas_desde_ultimo = (agora - data_ultimo).total_seconds() / 3600
-            if horas_desde_ultimo < HORAS_ENTRE_ENVIOS:
-                horas_restantes = HORAS_ENTRE_ENVIOS - horas_desde_ultimo
-                return False, template_atual, tentativas, f"Aguardar {horas_restantes:.1f}h para próximo envio"
-        
-        # Regra 3: Se já tem template 1, deve usar template 2
-        if ultimo_template == '1' and template_atual == '1':
-            template_atual = '2'
+    # Normalizar valores para busca
+    proposta_str = str(proposta_isize).strip() if proposta_isize else ''
+    cpf_str = str(cpf).strip() if cpf else ''
     
-    # Verificar também no banco local
-    try:
-        with db_manager._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT template_id, data_disparo, COUNT(*) as total
-                FROM disparos_wpp
-                WHERE codigo_externo = ?
-                GROUP BY codigo_externo
-                ORDER BY data_disparo DESC
-                LIMIT 1
-            """, (proposta_isize,))
-            row = cursor.fetchone()
-            
-            if row:
-                ultimo_template_db = str(row[0]) if row[0] else ''
-                data_ultimo_db = row[1]
-                total_db = row[2] or 0
-                
-                tentativas = max(tentativas, total_db)
-                
-                # Verificar 24h no banco local também
-                if data_ultimo_db:
-                    if isinstance(data_ultimo_db, str):
-                        try:
-                            data_ultimo_db = datetime.strptime(data_ultimo_db, '%Y-%m-%d %H:%M:%S')
-                        except ValueError:
-                            data_ultimo_db = None
-                    
-                    if data_ultimo_db:
-                        horas_desde_ultimo = (agora - data_ultimo_db).total_seconds() / 3600
-                        if horas_desde_ultimo < HORAS_ENTRE_ENVIOS:
-                            horas_restantes = HORAS_ENTRE_ENVIOS - horas_desde_ultimo
-                            return False, template_atual, tentativas, f"Aguardar {horas_restantes:.1f}h (banco local)"
-                
-                # Regra de alternância de template
-                if ultimo_template_db == '1' and template_atual == '1':
-                    template_atual = '2'
-                    
-    except Exception as e:
-        logger.debug(f"Erro ao verificar banco local: {e}")
+    # Buscar registros do cliente no histórico
+    mask = pd.Series([False] * len(historico_df))
     
-    return True, template_atual, tentativas + 1, "OK"
+    if proposta_str and 'Proposta_iSize' in historico_df.columns:
+        mask = mask | (historico_df['Proposta_iSize'].astype(str).str.strip() == proposta_str)
+    
+    if cpf_str and 'Cpf' in historico_df.columns:
+        mask = mask | (historico_df['Cpf'].astype(str).str.strip() == cpf_str)
+    
+    registros_cliente = historico_df[mask]
+    
+    if registros_cliente.empty:
+        # Cliente nunca recebeu mensagem
+        return tipo_comunicacao_novo
+    
+    # Contar envios com tipo 1 ou 2
+    if 'Tipo_Comunicacao' in registros_cliente.columns:
+        # Converter para numérico, tratando erros
+        tipos = pd.to_numeric(registros_cliente['Tipo_Comunicacao'], errors='coerce').fillna(0)
+        
+        # Contar envios efetivos (tipo 1 ou 2)
+        total_envios_efetivos = ((tipos == 1) | (tipos == 2)).sum()
+        
+        # Regra 2: Se já enviamos 5 vezes, não enviar mais
+        if total_envios_efetivos >= MAX_ENVIOS_POR_CLIENTE:
+            logger.debug(f"[GSHEET] Cliente {proposta_str or cpf_str}: {total_envios_efetivos} envios → Tipo 0 (bloqueado)")
+            return 0
+        
+        # Pegar último tipo de comunicação
+        ultimo_tipo = tipos.iloc[-1] if len(tipos) > 0 else 0
+        
+        # Regra 1: Se último foi 1 e novo é 1, classificar como 2
+        if ultimo_tipo == 1 and tipo_comunicacao_novo == 1:
+            logger.debug(f"[GSHEET] Cliente {proposta_str or cpf_str}: último=1, novo=1 → Tipo 2")
+            return 2
+    
+    return tipo_comunicacao_novo
+
+
+def processar_tipo_comunicacao_com_historico(
+    registros: list,
+    historico_df: pd.DataFrame
+) -> dict:
+    """
+    Processa todos os registros e ajusta o Tipo_Comunicacao baseado no histórico.
+    
+    Args:
+        registros: Lista de registros a processar
+        historico_df: DataFrame com histórico de envios
+        
+    Returns:
+        Dicionário com estatísticas {total, mantidos, alterados_para_2, bloqueados}
+    """
+    stats = {
+        'total': len(registros),
+        'mantidos': 0,
+        'alterados_para_2': 0,
+        'bloqueados': 0
+    }
+    
+    for registro in registros:
+        tipo_original = registro.get('tipo_comunicacao', 1)
+        if isinstance(tipo_original, str):
+            try:
+                tipo_original = int(tipo_original) if tipo_original.isdigit() else 1
+            except (ValueError, AttributeError):
+                tipo_original = 1
+        
+        tipo_ajustado = verificar_historico_cliente(
+            proposta_isize=registro.get('codigo_externo', ''),
+            cpf=registro.get('cpf', ''),
+            tipo_comunicacao_novo=tipo_original,
+            historico_df=historico_df
+        )
+        
+        # Atualizar registro com tipo ajustado
+        registro['tipo_comunicacao'] = tipo_ajustado
+        
+        # Contabilizar
+        if tipo_ajustado == 0:
+            stats['bloqueados'] += 1
+        elif tipo_ajustado == 2 and tipo_original == 1:
+            stats['alterados_para_2'] += 1
+        else:
+            stats['mantidos'] += 1
+    
+    return stats
 
 
 def normalizar_telefone(telefone: str) -> str:
@@ -349,6 +336,105 @@ def normalizar_cep(cep: str) -> str:
         cep_normalizado = cep_normalizado[:8]
     
     return cep_normalizado
+
+
+# Padrões de valores inválidos para número de endereço
+VALORES_NUMERO_INVALIDO = {
+    'sn', 's/n', 's.n', 's.n.', 'n/a', 'na', 'n.a', 'n.a.',
+    'nao tem', 'não tem', 'sem numero', 'sem número', 
+    'sem', 'nenhum', 'null', 'none', '-', '--', '.',
+    '0', '00', '000', 'zero'
+}
+
+# Padrões de complementos a extrair do número
+PADROES_COMPLEMENTO = [
+    r'\s*-?\s*bl\.?\s*(\w+)',           # BL A, BL. A, - BL A
+    r'\s*-?\s*bloco\.?\s*(\w+)',         # Bloco A
+    r'\s*-?\s*apto?\.?\s*(\d+\w*)',       # Apt 101, Apto. 101A
+    r'\s*-?\s*apartamento\.?\s*(\d+\w*)', # Apartamento 101
+    r'\s*-?\s*sala\.?\s*(\d+\w*)',        # Sala 101
+    r'\s*-?\s*loja\.?\s*(\d+\w*)',        # Loja 01
+    r'\s*-?\s*casa\.?\s*(\d+\w*)',        # Casa 2
+    r'\s*-?\s*fundos',                    # Fundos
+    r'\s*-?\s*frente',                    # Frente
+    r'\s*-?\s*lado\.?\s*(\w+)',           # Lado A
+    r'\s*-?\s*(\d+)\s*andar',             # 2 andar
+    r'\s*-?\s*andar\.?\s*(\d+)',          # Andar 2
+    r'\s+([A-Za-z])$',                    # Termina com letra (150 B -> numero=150, complemento=B)
+]
+
+import re
+
+def normalizar_numero_endereco(numero: str, complemento_existente: str = "") -> tuple:
+    """
+    Normaliza número de endereço:
+    - Se for sn, n/a, S/N, não tem, etc. -> retorna "0"
+    - Se tiver complementos como "B", "fundos", extrai e adiciona ao complemento
+    
+    Args:
+        numero: Número do endereço (pode conter complementos)
+        complemento_existente: Complemento já existente
+        
+    Returns:
+        Tupla (numero_normalizado, complemento_atualizado)
+    """
+    if not numero:
+        return "0", complemento_existente
+    
+    numero_str = str(numero).strip()
+    
+    # Verificar se é valor inválido (sn, n/a, etc.)
+    numero_lower = numero_str.lower().strip()
+    if numero_lower in VALORES_NUMERO_INVALIDO:
+        return "0", complemento_existente
+    
+    # Se não tem dígitos, é inválido
+    if not any(c.isdigit() for c in numero_str):
+        # Pode ser só complemento (ex: "Fundos")
+        complemento_novo = numero_str
+        if complemento_existente:
+            complemento_novo = f"{complemento_existente} - {numero_str}"
+        return "0", complemento_novo
+    
+    # Extrair número e possíveis complementos
+    numero_limpo = numero_str
+    complemento_extraido = []
+    
+    # Verificar cada padrão de complemento
+    for padrao in PADROES_COMPLEMENTO:
+        match = re.search(padrao, numero_str, re.IGNORECASE)
+        if match:
+            # Extrair o que foi encontrado
+            texto_match = match.group(0).strip()
+            complemento_extraido.append(texto_match.strip(' -'))
+            # Remover do número
+            numero_limpo = re.sub(padrao, '', numero_limpo, flags=re.IGNORECASE).strip()
+    
+    # Se o número restante tem letra isolada no final (ex: "150 B")
+    match_letra = re.match(r'^(\d+)\s*([A-Za-z])$', numero_limpo)
+    if match_letra:
+        numero_limpo = match_letra.group(1)
+        complemento_extraido.append(match_letra.group(2).upper())
+    
+    # Limpar número - pegar só os dígitos iniciais
+    numero_final = ''.join(c for c in numero_limpo if c.isdigit())
+    
+    # Se não sobrou número válido
+    if not numero_final:
+        numero_final = "0"
+    
+    # Montar complemento final
+    complemento_final = complemento_existente or ""
+    if complemento_extraido:
+        novo_complemento = " ".join(complemento_extraido)
+        if complemento_final:
+            # Não duplicar se já existir
+            if novo_complemento.lower() not in complemento_final.lower():
+                complemento_final = f"{complemento_final} - {novo_complemento}"
+        else:
+            complemento_final = novo_complemento
+    
+    return numero_final, complemento_final.strip(' -')
 
 
 def normalizar_data_venda(data) -> str:
@@ -743,131 +829,96 @@ def gerar_arquivo_homologacao():
         tabelas_existentes = [row[0] for row in cursor.fetchall()]
         tem_base_coverte = 'base_coverte_prop' in tabelas_existentes
         tem_relatorio_objetos = 'relatorio_objetos' in tabelas_existentes
-        tem_disparos_wpp = 'disparos_wpp' in tabelas_existentes
-        
-        # Criar tabela de controle de disparos se não existir
-        if not tem_disparos_wpp:
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS disparos_wpp (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                codigo_externo TEXT NOT NULL,
-                cpf TEXT,
-                template_id INTEGER,
-                data_disparo DATETIME DEFAULT CURRENT_TIMESTAMP,
-                status_disparo TEXT DEFAULT 'ENVIADO',
-                observacao TEXT,
-                UNIQUE(codigo_externo, template_id)
-            )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_disparos_codigo ON disparos_wpp(codigo_externo)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_disparos_cpf ON disparos_wpp(cpf)")
-            conn.commit()
-            tem_disparos_wpp = True
-            print("    >> Tabela disparos_wpp criada para controle de disparos")
         
         if tem_base_coverte:
             print("    >> Usando base_coverte_prop + portabilidade_records" + (" + relatorio_objetos" if tem_relatorio_objetos else ""))
         else:
             print("    >> Tabela base_coverte_prop não encontrada, usando apenas portabilidade_records")
         
-        # Buscar registros que têm template e estão mapeados, sincronizando com base_coverte_prop e relatorio_objetos
+        # Buscar registros ÚNICOS por codigo_externo, priorizando base_coverte_prop como fonte principal
+        # Remove duplicados usando GROUP BY garantindo um único registro por codigo_externo
+        # FILTRO: Apenas clientes com crivo_vendas = "APROVADA"
         if tem_base_coverte:
             query = """
-            SELECT DISTINCT
+            SELECT 
                 -- Dados de portabilidade_records
-                pr.id, 
-                COALESCE(bc.cpf, pr.cpf""" + (", ro.documento" if tem_relatorio_objetos else "") + """, '') AS cpf,
-                COALESCE(pr.numero_acesso, '') AS numero_acesso,
-                COALESCE(pr.numero_ordem, bc.numero_ordem, '') AS numero_ordem,
+                MAX(pr.id) AS id, 
+                COALESCE(MAX(bc.cpf), MAX(pr.cpf)""" + (", MAX(ro.documento)" if tem_relatorio_objetos else "") + """, '') AS cpf,
+                COALESCE(MAX(pr.numero_acesso), '') AS numero_acesso,
+                COALESCE(MAX(bc.numero_ordem), MAX(pr.numero_ordem), '') AS numero_ordem,
                 COALESCE(bc.proposta_isize, bc.codigo_externo, pr.codigo_externo""" + (", ro.codigo_externo" if tem_relatorio_objetos else "") + """, '') AS codigo_externo,
                 
-                -- Template e regras
-                pr.tipo_mensagem,
-                pr.template,
-                pr.regra_id,
-                pr.o_que_aconteceu,
-                pr.acao_a_realizar,
+                -- Template e regras (priorizar dados existentes)
+                COALESCE(MAX(pr.tipo_mensagem), '') AS tipo_mensagem,
+                COALESCE(MAX(pr.template), '1') AS template,
+                MAX(pr.regra_id) AS regra_id,
+                COALESCE(MAX(pr.o_que_aconteceu), '') AS o_que_aconteceu,
+                COALESCE(MAX(pr.acao_a_realizar), '') AS acao_a_realizar,
                 
-                -- Dados adicionais de base_coverte_prop
-                bc.cliente_nome,
-                bc.telefone_portado,
-                bc.data_venda,
-                bc.plano,
-                bc.endereco,
-                bc.numero,
-                bc.complemento,
-                bc.bairro,
-                bc.cidade,
-                bc.uf,
-                bc.cep,
-                bc.ponto_referencia,
-                bc.crivo_vendas,
+                -- Dados adicionais de base_coverte_prop (FONTE PRINCIPAL)
+                MAX(bc.cliente_nome) AS cliente_nome,
+                MAX(bc.telefone_portado) AS telefone_portado,
+                MAX(bc.data_venda) AS data_venda,
+                MAX(bc.plano) AS plano,
+                MAX(bc.endereco) AS endereco,
+                MAX(bc.numero) AS numero,
+                MAX(bc.complemento) AS complemento,
+                MAX(bc.bairro) AS bairro,
+                MAX(bc.cidade) AS cidade,
+                MAX(bc.uf) AS uf,
+                MAX(bc.cep) AS cep,
+                MAX(bc.ponto_referencia) AS ponto_referencia,
+                MAX(bc.crivo_vendas) AS crivo_vendas,
                 
                 -- Dados de logística (relatorio_objetos)
                 """ + ("""
-                ro.nu_pedido,
-                ro.rastreio,
-                ro.status AS ro_status
+                MAX(ro.nu_pedido) AS nu_pedido,
+                MAX(ro.rastreio) AS rastreio,
+                MAX(ro.status) AS ro_status,
                 """ if tem_relatorio_objetos else """
-                NULL AS ro_nu_pedido,
-                NULL AS ro_rastreio,
-                NULL AS ro_status
+                NULL AS nu_pedido,
+                NULL AS rastreio,
+                NULL AS ro_status,
                 """) + """
                 
-            FROM portabilidade_records pr
-            LEFT JOIN base_coverte_prop bc ON (
+                -- Contadores para controle de duplicação/reclassificação
+                COUNT(DISTINCT pr.id) AS total_classificacoes,
+                CASE WHEN COUNT(DISTINCT pr.id) > 1 THEN 'SIM' ELSE 'NAO' END AS houve_reclassificacao
+                
+            FROM base_coverte_prop bc
+            LEFT JOIN portabilidade_records pr ON (
                 TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) = 
                 TRIM(COALESCE(CAST(pr.codigo_externo AS TEXT), ''))
             )
             """ + ("""
             LEFT JOIN relatorio_objetos ro ON (
-                TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), CAST(pr.codigo_externo AS TEXT), '')) = 
+                TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) = 
                 TRIM(COALESCE(CAST(ro.codigo_externo AS TEXT), ''))
             )
-            """ if tem_relatorio_objetos else "") + ("""
-            LEFT JOIN disparos_wpp dw ON (
-                TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), CAST(pr.codigo_externo AS TEXT), '')) = 
-                TRIM(COALESCE(CAST(dw.codigo_externo AS TEXT), ''))
-            )
-            """ if tem_disparos_wpp else "") + """
-            WHERE pr.template IS NOT NULL 
-              AND pr.template != ''
-              AND pr.template != '-'
-              AND pr.mapeado = 1
-              -- FILTRO CRÍTICO: Apenas vendas APROVADAS no CRIVO recebem mensagem WPP
+            """ if tem_relatorio_objetos else "") + """
+            WHERE bc.proposta_isize IS NOT NULL 
+              AND TRIM(COALESCE(bc.proposta_isize, bc.codigo_externo, '')) != ''
+              AND (pr.template IS NOT NULL OR bc.data_venda >= '2026-01-01')
+              -- FILTRO CRÍTICO: Apenas clientes com crivo_vendas = "APROVADA"
               AND UPPER(TRIM(COALESCE(CAST(bc.crivo_vendas AS TEXT), ''))) = 'APROVADA'
-              """ + ("""
-              -- FILTRO: Excluir registros que já tiveram disparo realizado
-              AND dw.id IS NULL
-              """ if tem_disparos_wpp else "") + """
-            ORDER BY 
-                CASE 
-                    WHEN bc.data_venda IS NOT NULL 
-                         AND TRIM(CAST(bc.data_venda AS TEXT)) != ''
-                         AND (SUBSTR(TRIM(CAST(bc.data_venda AS TEXT)), 5, 1) = '-' OR LENGTH(TRIM(CAST(bc.data_venda AS TEXT))) >= 10)
-                         AND SUBSTR(TRIM(CAST(bc.data_venda AS TEXT)), 1, 4) GLOB '[0-9][0-9][0-9][0-9]'
-                    THEN date(SUBSTR(TRIM(CAST(bc.data_venda AS TEXT)), 1, 10))
-                    WHEN bc.data_venda IS NOT NULL 
-                         AND TRIM(CAST(bc.data_venda AS TEXT)) != ''
-                         AND LENGTH(TRIM(CAST(bc.data_venda AS TEXT))) >= 10
-                         AND SUBSTR(TRIM(CAST(bc.data_venda AS TEXT)), 3, 1) = '/'
-                         AND SUBSTR(TRIM(CAST(bc.data_venda AS TEXT)), 6, 1) = '/'
-                    THEN date(
-                        SUBSTR(TRIM(CAST(bc.data_venda AS TEXT)), 7, 4) || '-' || 
-                        SUBSTR(TRIM(CAST(bc.data_venda AS TEXT)), 4, 2) || '-' || 
-                        SUBSTR(TRIM(CAST(bc.data_venda AS TEXT)), 1, 2)
-                    )
-                    ELSE date('1900-01-01')
-                END DESC,
-                pr.id DESC
+            GROUP BY COALESCE(bc.proposta_isize, bc.codigo_externo, pr.codigo_externo""" + (", ro.codigo_externo" if tem_relatorio_objetos else "") + """, '')
+            ORDER BY MAX(bc.data_venda) DESC NULLS LAST
             LIMIT 5000
             """
         else:
-            # Fallback: usar apenas portabilidade_records
+            # Fallback: usar apenas portabilidade_records (com deduplicação)
             query = """
-            SELECT DISTINCT
-                id, cpf, numero_acesso, numero_ordem, codigo_externo,
-                tipo_mensagem, template, regra_id, o_que_aconteceu, acao_a_realizar,
+            SELECT 
+                MAX(id) AS id, 
+                MAX(cpf) AS cpf, 
+                MAX(numero_acesso) AS numero_acesso, 
+                MAX(numero_ordem) AS numero_ordem, 
+                codigo_externo,
+                MAX(tipo_mensagem) AS tipo_mensagem, 
+                MAX(template) AS template, 
+                MAX(regra_id) AS regra_id, 
+                MAX(o_que_aconteceu) AS o_que_aconteceu, 
+                MAX(acao_a_realizar) AS acao_a_realizar,
                 NULL AS cliente_nome,
                 NULL AS telefone_portado,
                 NULL AS data_venda,
@@ -883,12 +934,15 @@ def gerar_arquivo_homologacao():
                 NULL AS crivo_vendas,
                 NULL AS ro_nu_pedido,
                 NULL AS ro_rastreio,
-                NULL AS ro_status
+                NULL AS ro_status,
+                COUNT(*) AS total_classificacoes,
+                CASE WHEN COUNT(*) > 1 THEN 'SIM' ELSE 'NAO' END AS houve_reclassificacao
             FROM portabilidade_records
             WHERE template IS NOT NULL 
               AND template != ''
               AND template != '-'
               AND mapeado = 1
+            GROUP BY codigo_externo
             ORDER BY id DESC
             LIMIT 1000
             """
@@ -902,11 +956,20 @@ def gerar_arquivo_homologacao():
         print("Nenhum registro com template encontrado!")
         return
     
+    # 2.0 Carregar histórico de envios do Google Sheets
+    print("[2.0] Carregando histórico de envios do Google Sheets...")
+    historico_envios_df = carregar_historico_envios_gsheet()
+    if not historico_envios_df.empty:
+        print(f"    >> {len(historico_envios_df)} registros no histórico de envios")
+    else:
+        print("    >> Histórico de envios não disponível (será ignorado)")
+    
     # 3. Processar registros e gerar dados de homologação
     print("[3] Processando registros e gerando preview de mensagens...")
     
     homologacao_data = []
     template_stats = {}
+    historico_stats = {'mantidos': 0, 'alterados_para_2': 0, 'bloqueados': 0}
     
     # Tentar carregar Relatório de Objetos para enriquecimento
     print("[2.1] Tentando carregar Relatório de Objetos para enriquecimento...")
@@ -957,23 +1020,9 @@ def gerar_arquivo_homologacao():
     elif not tem_base_unificada:
         print(f"    >> Base analítica não encontrada (nem no banco nem em arquivo)")
     
-    registros_filtrados_crivo = 0
-    registros_filtrados_24h = 0
-    registros_filtrados_tentativas = 0
-    
-    # Carregar histórico do Google Sheets para controle de tentativas
-    print("[2.3] Carregando histórico de disparos para controle...")
-    historico_disparos = carregar_historico_gsheets()
-    
     for row in rows:
         # Converter row para dict usando colunas
         row_dict = dict(zip(columns, row))
-        
-        # VERIFICAÇÃO CRÍTICA: Apenas APROVADA no CRIVO pode receber mensagem
-        crivo_vendas = str(row_dict.get('crivo_vendas', '') or '').strip().upper()
-        if crivo_vendas != 'APROVADA':
-            registros_filtrados_crivo += 1
-            continue  # Não processar este registro - APENAS APROVADA
         
         # Criar registro básico usando dados sincronizados
         record = PortabilidadeRecord(
@@ -1009,10 +1058,16 @@ def gerar_arquivo_homologacao():
                 pass
         
         # Preencher dados de endereço diretamente da query SQL (base_coverte_prop)
+        numero_bruto = str(row_dict.get('numero', '')).strip() if row_dict.get('numero') else ''
+        complemento_bruto = str(row_dict.get('complemento', '')).strip() if row_dict.get('complemento') else ''
+        
+        # Normalizar número e extrair complementos (sn, n/a, S/N -> 0, "150 B" -> numero=150, complemento=B)
+        numero_normalizado, complemento_atualizado = normalizar_numero_endereco(numero_bruto, complemento_bruto)
+        
         endereco_data = {
             'endereco': str(row_dict.get('endereco', '')).strip() if row_dict.get('endereco') else '',
-            'numero': str(row_dict.get('numero', '')).strip() if row_dict.get('numero') else '',
-            'complemento': str(row_dict.get('complemento', '')).strip() if row_dict.get('complemento') else '',
+            'numero': numero_normalizado,
+            'complemento': complemento_atualizado,
             'bairro': str(row_dict.get('bairro', '')).strip() if row_dict.get('bairro') else '',
             'ponto_referencia': str(row_dict.get('ponto_referencia', '')).strip() if row_dict.get('ponto_referencia') else ''
         }
@@ -1128,10 +1183,20 @@ def gerar_arquivo_homologacao():
                 record.data_venda = getattr(obj_match, 'data_criacao_pedido', None) or getattr(obj_match, 'data_venda', None) or record.data_venda
                 record.status_logistica = getattr(obj_match, 'status', None) or getattr(obj_match, 'status_logistica', None) or record.status_logistica or ""
                 
-                # Dados de endereço do ObjectRecord
+                # Dados de endereço do ObjectRecord (normalizar número)
                 endereco_data['endereco'] = getattr(obj_match, 'endereco', '') or endereco_data['endereco'] or ''
-                endereco_data['numero'] = getattr(obj_match, 'numero', '') or endereco_data['numero'] or ''
-                endereco_data['complemento'] = getattr(obj_match, 'complemento', '') or endereco_data['complemento'] or ''
+                
+                # Normalizar número do ObjectRecord
+                numero_obj = getattr(obj_match, 'numero', '') or ''
+                complemento_obj = getattr(obj_match, 'complemento', '') or ''
+                if numero_obj and not endereco_data['numero']:
+                    numero_norm, compl_norm = normalizar_numero_endereco(numero_obj, complemento_obj)
+                    endereco_data['numero'] = numero_norm
+                    if compl_norm and not endereco_data['complemento']:
+                        endereco_data['complemento'] = compl_norm
+                elif complemento_obj and not endereco_data['complemento']:
+                    endereco_data['complemento'] = complemento_obj
+                
                 endereco_data['bairro'] = getattr(obj_match, 'bairro', '') or endereco_data['bairro'] or ''
                 endereco_data['ponto_referencia'] = getattr(obj_match, 'ponto_referencia', '') or endereco_data['ponto_referencia'] or ''
                 
@@ -1192,12 +1257,6 @@ def gerar_arquivo_homologacao():
                     # Converter para dict usando nomes das colunas
                     col_names = [desc[0] for desc in cursor.description]
                     base_coverte_match = dict(zip(col_names, row))
-                    
-                    # VERIFICAÇÃO CRÍTICA: Se encontrou match no base_coverte_prop, verificar CRIVO
-                    crivo_match = str(base_coverte_match.get('crivo_vendas', '') or '').strip().upper()
-                    if crivo_match in ['REPROVADA CRIVO', 'REPROVADA', 'REPROVADO', 'REPROVADO CRIVO']:
-                        registros_filtrados_crivo += 1
-                        continue  # Pular este registro - CRIVO REPROVADO
         
         # Sempre buscar na Base Analítica Final para preencher endereços e dados faltantes
         base_match = None
@@ -1331,15 +1390,19 @@ def gerar_arquivo_homologacao():
                     if pd.notna(endereco) and endereco and str(endereco).strip():
                         endereco_data['endereco'] = str(endereco).strip()
                     
-                    # Numero
+                    # Numero e Complemento (normalizar)
                     numero = base_match.get('Numero') or base_match.get('Número') or base_match.get('Numero')
-                    if pd.notna(numero) and numero and str(numero).strip():
-                        endereco_data['numero'] = str(numero).strip()
-                    
-                    # Complemento
                     complemento = base_match.get('Complemento')
-                    if pd.notna(complemento) and complemento and str(complemento).strip():
-                        endereco_data['complemento'] = str(complemento).strip()
+                    complemento_str = str(complemento).strip() if pd.notna(complemento) and complemento else ''
+                    
+                    if pd.notna(numero) and numero and str(numero).strip():
+                        numero_str = str(numero).strip()
+                        # Normalizar número e extrair complementos
+                        numero_norm, compl_norm = normalizar_numero_endereco(numero_str, complemento_str)
+                        endereco_data['numero'] = numero_norm
+                        endereco_data['complemento'] = compl_norm
+                    elif complemento_str:
+                        endereco_data['complemento'] = complemento_str
                     
                     # Bairro
                     bairro = base_match.get('Bairro')
@@ -1407,31 +1470,6 @@ def gerar_arquivo_homologacao():
         if not template_id:
             continue
         
-        # Tipo_Comunicacao: usar Template_Triggers, substituir "EM CRIAÇÃO" por "1"
-        template_triggers = record.template or ''
-        tipo_comunicacao = template_triggers
-        if template_triggers.upper() in ['EM CRIAÇÃO', 'EM CRIACAO', 'EM_CRIACAO']:
-            tipo_comunicacao = '1'
-        
-        # VERIFICAÇÃO DE TENTATIVAS E REGRAS DE ENVIO
-        proposta_isize = record.codigo_externo or ''
-        pode_enviar, tipo_comunicacao_final, tentativas, motivo = verificar_pode_enviar(
-            proposta_isize, 
-            tipo_comunicacao, 
-            historico_disparos,
-            db_manager
-        )
-        
-        if not pode_enviar:
-            if 'Aguardar' in motivo:
-                registros_filtrados_24h += 1
-            elif 'Limite' in motivo:
-                registros_filtrados_tentativas += 1
-            continue  # Não incluir na fila de disparos
-        
-        # Usar o tipo de comunicação ajustado (pode ter mudado de 1 para 2)
-        tipo_comunicacao = tipo_comunicacao_final
-        
         # Estatísticas
         template_stats[template_id] = template_stats.get(template_id, 0) + 1
         
@@ -1467,21 +1505,69 @@ def gerar_arquivo_homologacao():
         # Normalizar Data_Venda (DD/MM/AAAA) - usar Data Conectada
         data_venda_formatada = normalizar_data_venda(record.data_venda)
         
-        # EXTRAIR LETRAS DO NÚMERO E MOVER PARA COMPLEMENTO
-        numero_original = endereco_data['numero'] or ''
-        complemento_original = endereco_data['complemento'] or ''
-        numero_limpo, complemento_atualizado = extrair_numero_e_complemento(numero_original, complemento_original)
+        # Tipo_Comunicacao: usar Template_Triggers, substituir "EM CRIAÇÃO" por "1"
+        template_triggers = record.template or ''
+        tipo_comunicacao = template_triggers
+        if template_triggers.upper() in ['EM CRIAÇÃO', 'EM CRIACAO', 'EM_CRIACAO']:
+            tipo_comunicacao = '1'
+        
+        # Converter tipo_comunicacao para int para verificação de histórico
+        try:
+            tipo_comunicacao_int = int(tipo_comunicacao) if str(tipo_comunicacao).isdigit() else 1
+        except (ValueError, TypeError):
+            tipo_comunicacao_int = 1
+        
+        # Verificar histórico de envios e ajustar Tipo_Comunicacao
+        if not historico_envios_df.empty:
+            tipo_comunicacao_ajustado = verificar_historico_cliente(
+                proposta_isize=record.codigo_externo,
+                cpf=record.cpf,
+                tipo_comunicacao_novo=tipo_comunicacao_int,
+                historico_df=historico_envios_df
+            )
+            
+            # Contabilizar alterações
+            if tipo_comunicacao_ajustado == 0:
+                historico_stats['bloqueados'] += 1
+            elif tipo_comunicacao_ajustado == 2 and tipo_comunicacao_int == 1:
+                historico_stats['alterados_para_2'] += 1
+            else:
+                historico_stats['mantidos'] += 1
+            
+            tipo_comunicacao = str(tipo_comunicacao_ajustado)
+        
+        # Extrair contagens e flags de reclassificação da query
+        total_classificacoes = row_dict.get('total_classificacoes', 1)
+        try:
+            total_classificacoes = int(total_classificacoes) if total_classificacoes else 1
+        except (ValueError, TypeError):
+            total_classificacoes = 1
+        
+        houve_reclassificacao = row_dict.get('houve_reclassificacao', 'NAO')
+        if not houve_reclassificacao or houve_reclassificacao == 'NAO':
+            houve_reclassificacao = 'NAO'
+        else:
+            houve_reclassificacao = 'SIM'
+        
+        # Contagem de tentativas (baseado no histórico de envios)
+        tentativas = 0
+        if not historico_envios_df.empty and record.codigo_externo:
+            # Contar quantas vezes este cliente já recebeu mensagens
+            mask = (
+                (historico_envios_df.get('proposta_isize', pd.Series()).astype(str).str.strip() == str(record.codigo_externo).strip()) |
+                (historico_envios_df.get('cpf', pd.Series()).astype(str).str.strip() == str(record.cpf).strip())
+            )
+            tentativas = mask.sum() if hasattr(mask, 'sum') else 0
         
         # Ordem IMUTÁVEL das colunas principais (conforme especificado para Google Sheets)
-        # REMOVIDA coluna vazia (_vazia) conforme solicitado
         row_data = {
             'Proposta_iSize': record.codigo_externo or '',
             'Cpf': record.cpf or '',
             'NomeCliente': nome_cliente_formatado,
             'Telefone_Contato': telefone_contato,
             'Endereco': endereco_data['endereco'] or '',
-            'Numero': numero_limpo,  # Apenas números
-            'Complemento': complemento_atualizado,  # Inclui letras extraídas do número
+            'Numero': endereco_data['numero'] or '',
+            'Complemento': endereco_data['complemento'] or '',
             'Bairro': endereco_data['bairro'] or '',
             'Cidade': record.cidade or '',
             'UF': record.uf or '',
@@ -1490,7 +1576,9 @@ def gerar_arquivo_homologacao():
             'Cod_Rastreio': link_rastreio or '',
             'Data_Venda': data_venda_formatada,
             'Tipo_Comunicacao': tipo_comunicacao,
-            'Tentativas': tentativas,  # Nova coluna com contagem de tentativas
+            'Tentativas': tentativas,
+            'Total_Classificacoes': total_classificacoes,
+            'Houve_Reclassificacao': houve_reclassificacao,
             'Status_Disparo': 'FALSE',  # Sempre FALSE
             'DataHora_Disparo': '',  # Sempre vazio
         }
@@ -1523,13 +1611,14 @@ def gerar_arquivo_homologacao():
     
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         if homologacao_data:
-            # Ordem das colunas principais (para Google Sheets)
-            # REMOVIDA coluna vazia (_vazia) conforme solicitado
-            # ADICIONADA coluna Tentativas para controle
+            # Ordem IMUTÁVEL das colunas principais (para Google Sheets)
+            # Removida coluna vazia após NomeCliente (conforme solicitado)
             colunas_principais = [
                 'Proposta_iSize', 'Cpf', 'NomeCliente', 'Telefone_Contato',
                 'Endereco', 'Numero', 'Complemento', 'Bairro', 'Cidade', 'UF', 'Cep', 'Ponto_Referencia',
-                'Cod_Rastreio', 'Data_Venda', 'Tipo_Comunicacao', 'Tentativas', 'Status_Disparo', 'DataHora_Disparo'
+                'Cod_Rastreio', 'Data_Venda', 'Tipo_Comunicacao', 
+                'Tentativas', 'Total_Classificacoes', 'Houve_Reclassificacao',
+                'Status_Disparo', 'DataHora_Disparo'
             ]
             
             # Colunas apenas para homologação (não se aplica à produção) - adicionadas no final
@@ -1552,59 +1641,44 @@ def gerar_arquivo_homologacao():
     
     print(f"    >> Arquivo salvo em: {output_path}")
     
-    # 4.1. Registrar disparos na tabela de controle (para evitar envios duplicados)
-    print("[4.1] Registrando disparos na tabela de controle...")
-    disparos_registrados = 0
-    with db_manager._get_connection() as conn:
-        cursor = conn.cursor()
-        for row in homologacao_data:
-            codigo_externo = row.get('Proposta_iSize', '')
-            cpf = row.get('Cpf', '')
-            template_triggers = row.get('Template_Triggers', '')
-            
-            # Tentar extrair template_id do template_triggers
-            template_id = None
-            try:
-                if template_triggers and template_triggers.isdigit():
-                    template_id = int(template_triggers)
-            except:
-                pass
-            
-            if codigo_externo:
-                try:
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO disparos_wpp (codigo_externo, cpf, template_id, observacao)
-                        VALUES (?, ?, ?, 'Gerado via homologacao_wpp')
-                    """, (codigo_externo, cpf, template_id))
-                    if cursor.rowcount > 0:
-                        disparos_registrados += 1
-                except Exception as e:
-                    logger.debug(f"Erro ao registrar disparo para {codigo_externo}: {e}")
-        
-        conn.commit()
-    
-    print(f"    >> {disparos_registrados} novos disparos registrados na tabela de controle")
-    
     # 5. Estatísticas
     print()
     print("=" * 70)
     print("ESTATÍSTICAS DE HOMOLOGAÇÃO")
     print("=" * 70)
-    print(f"  Total de registros gerados: {len(homologacao_data)}")
-    print()
-    print("  FILTROS APLICADOS:")
-    if registros_filtrados_crivo > 0:
-        print(f"    ⚠️  CRIVO não APROVADA: {registros_filtrados_crivo}")
-    if registros_filtrados_24h > 0:
-        print(f"    ⏱️  Aguardando 24h: {registros_filtrados_24h}")
-    if registros_filtrados_tentativas > 0:
-        print(f"    🚫 Limite de tentativas ({MAX_TENTATIVAS_TEMPLATE}): {registros_filtrados_tentativas}")
+    print(f"  Total de registros: {len(homologacao_data)}")
     print()
     print("  Por Template:")
     for template_id, count in sorted(template_stats.items()):
         config = TEMPLATES.get(template_id)
         nome = config.nome_modelo if config else f"Template {template_id}"
         print(f"    Template {template_id} ({nome}): {count} registros")
+    
+    # Estatísticas de verificação de histórico
+    if not historico_envios_df.empty:
+        print()
+        print("  Verificação de Histórico (Google Sheets):")
+        print(f"    Registros mantidos: {historico_stats['mantidos']}")
+        print(f"    Alterados de 1→2 (reenvio): {historico_stats['alterados_para_2']}")
+        print(f"    Bloqueados (≥{MAX_ENVIOS_POR_CLIENTE} envios): {historico_stats['bloqueados']}")
+        
+        # Contar quantos registros por tipo final
+        tipos_finais = {}
+        for row in homologacao_data:
+            tipo = row.get('Tipo_Comunicacao', '1')
+            tipos_finais[tipo] = tipos_finais.get(tipo, 0) + 1
+        
+        print()
+        print("  Por Tipo_Comunicacao final:")
+        for tipo, count in sorted(tipos_finais.items()):
+            status = ""
+            if tipo == '0':
+                status = "(BLOQUEADO - não enviar)"
+            elif tipo == '1':
+                status = "(primeira comunicação)"
+            elif tipo == '2':
+                status = "(segunda comunicação)"
+            print(f"    Tipo {tipo}: {count} registros {status}")
     
     print()
     print("-" * 70)
