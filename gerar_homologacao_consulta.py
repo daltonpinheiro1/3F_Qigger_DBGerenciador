@@ -31,6 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from src.database.db_manager import DatabaseManager
+from src.utils.validar_processamento import filtrar_registros_validos, obter_estatisticas_validacao
 
 # Importar BaseAnaliticaLoader
 try:
@@ -214,6 +215,32 @@ def gerar_homologacao_consulta():
     print(f"    >> Mês vigente: {mes_atual:02d}/{ano_atual}")
     print(f"    >> Data de hoje: {hoje.strftime('%d/%m/%Y')}")
     print(f"    >> Considerando datas de: 01/{mes_atual:02d}/{ano_atual} até 31/{mes_atual:02d}/{ano_atual}")
+    
+    # [2.1] Validar registros usando tabela portabilidade_processamento
+    print("[2.1] Validando registros com tabela portabilidade_processamento...")
+    try:
+        # Filtrar registros válidos
+        registros_validos, registros_invalidos = filtrar_registros_validos(
+            db_manager, all_records
+        )
+        
+        # Estatísticas de validação
+        stats_validacao = obter_estatisticas_validacao(db_manager)
+        print(f"    >> {len(registros_validos)} registros válidos para processamento")
+        print(f"    >> {len(registros_invalidos)} registros inválidos (serão ignorados)")
+        if stats_validacao['total_registros'] > 0:
+            print(f"    >> Estatísticas da tabela portabilidade_processamento:")
+            print(f"       - Total: {stats_validacao['total_registros']}")
+            print(f"       - Válidos: {stats_validacao['validos']}")
+            print(f"       - Com conflito: {stats_validacao['com_conflito']}")
+            print(f"       - Com cancelamento: {stats_validacao['com_cancelamento']}")
+        
+        # Usar apenas registros válidos
+        all_records = registros_validos
+        print(f"    >> Processando {len(all_records)} registros válidos")
+    except Exception as e:
+        logger.warning(f"Erro ao validar registros (continuando sem validação): {e}")
+        print(f"    >> Aviso: Validação não pôde ser executada, processando todos os registros")
     
     registros_filtrados = []
     stats = {

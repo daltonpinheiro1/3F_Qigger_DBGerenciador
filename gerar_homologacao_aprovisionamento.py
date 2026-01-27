@@ -16,6 +16,8 @@ from src.database.db_manager import DatabaseManager
 from src.utils.objects_loader import ObjectsLoader
 from src.models.portabilidade import PortabilidadeStatus, StatusOrdem
 from src.utils.csv_generator import CSVGenerator
+from src.utils.validar_processamento import filtrar_registros_validos, obter_estatisticas_validacao
+from src.utils.progress_bar import ProgressBar
 
 # Configurar logging
 Path('logs').mkdir(exist_ok=True)
@@ -270,6 +272,43 @@ def main():
         print("\n⚠ Nenhum registro em aprovisionamento encontrado!")
         return
     
+    # [2.1] Validar registros usando tabela portabilidade_processamento
+    print("[2.1] Validando registros com tabela portabilidade_processamento...")
+    try:
+        # Converter rows para lista de dicionários
+        registros_para_validar = []
+        for row in rows:
+            row_dict = dict(zip(columns, row))
+            registros_para_validar.append(row_dict)
+        
+        # Filtrar registros válidos
+        registros_validos, registros_invalidos = filtrar_registros_validos(
+            db_manager, registros_para_validar
+        )
+        
+        # Estatísticas de validação
+        stats_validacao = obter_estatisticas_validacao(db_manager)
+        print(f"    >> {len(registros_validos)} registros válidos para processamento")
+        print(f"    >> {len(registros_invalidos)} registros inválidos (serão ignorados)")
+        if stats_validacao['total_registros'] > 0:
+            print(f"    >> Estatísticas da tabela portabilidade_processamento:")
+            print(f"       - Total: {stats_validacao['total_registros']}")
+            print(f"       - Válidos: {stats_validacao['validos']}")
+            print(f"       - Com conflito: {stats_validacao['com_conflito']}")
+            print(f"       - Com cancelamento: {stats_validacao['com_cancelamento']}")
+        
+        # Reconstruir rows apenas com registros válidos
+        rows_validos = []
+        for registro in registros_validos:
+            row_reconstruido = [registro.get(col, None) for col in columns]
+            rows_validos.append(row_reconstruido)
+        
+        rows = rows_validos
+        print(f"    >> Processando {len(rows)} registros válidos")
+    except Exception as e:
+        logger.warning(f"Erro ao validar registros (continuando sem validação): {e}")
+        print(f"    >> Aviso: Validação não pôde ser executada, processando todos os registros")
+    
     # [3] Carregar ObjectsLoader para verificar entrega
     print("[3] Carregando Relatório de Objetos para verificar entrega...")
     objects_loader = None
@@ -304,12 +343,15 @@ def main():
     aprovisionados_entregues = []
     results_map = {}  # Simular results_map vazio para homologação
     
-    for row in rows:
-        record_dict = dict(zip(columns, row))
-        
-        # Criar record
-        try:
-            record = PortabilidadeRecord(
+    with ProgressBar(
+        total=len(rows),
+        desc="Processando aprovisionamentos",
+        unit="registros"
+    ) as pbar:
+        for row in rows:
+            record_dict = dict(zip(columns, row))
+            try:
+                record = PortabilidadeRecord(
                 cpf=str(record_dict.get('cpf', '') or '').strip(),
                 numero_acesso=str(record_dict.get('numero_acesso', '') or '').strip(),
                 numero_ordem=str(record_dict.get('numero_ordem', '') or '').strip(),
@@ -338,96 +380,97 @@ def main():
                 ajustes_registro=record_dict.get('ajustes_registro'),
                 numero_acesso_valido=bool(record_dict.get('numero_acesso_valido')) if record_dict.get('numero_acesso_valido') else None,
                 ajustes_numero_acesso=record_dict.get('ajustes_numero_acesso')
-            )
-        except Exception as e:
-            logger.error(f"Erro ao criar record: {e} - Dados: {record_dict}")
-            continue
-        
-        # Verificar Status da ordem: deve ser "Em Aprovisionamento" (não "Erro no Aprovisionamento")
-        status_ordem_valido = False
-        if record.status_ordem:
-            status_ordem_str = str(record.status_ordem.value if hasattr(record.status_ordem, 'value') else record.status_ordem)
-            if 'Em Aprovisionamento' in status_ordem_str and 'Erro' not in status_ordem_str:
-                status_ordem_valido = True
-        
-        if not status_ordem_valido:
-            continue
-        
-        # EXCLUIR registros com motivos específicos
-        motivo_recusa = str(record.motivo_recusa or '').strip()
-        motivo_cancelamento = str(record.motivo_cancelamento or '').strip()
-        
-        motivos_excluir = [
-            'Rejeição do Cliente via SMS',
-            'CPF Inválido',
-            'Portabilidade de Número Vago',
-            'Portabillidade de Número Vago',  # Com erro de digitação
-            'Tipo de cliente inválido'
-        ]
-        
-        # Verificar se algum motivo de exclusão está presente
-        deve_excluir = False
-        for motivo in motivos_excluir:
-            if motivo.lower() in motivo_recusa.lower() or motivo.lower() in motivo_cancelamento.lower():
-                deve_excluir = True
-                break
-        
-        if deve_excluir:
-            continue
-        
-        # Verificar se está entregue usando dados sincronizados
-        is_entregue = False
-        
-        # PRIORIDADE 1: Verificar dados de relatorio_objetos (já sincronizados na query)
-        if record_dict.get('ro_ultima_ocorrencia'):
-            ultima_ocorrencia_str = str(record_dict['ro_ultima_ocorrencia']).lower()
-            if 'entrega cancelada' not in ultima_ocorrencia_str and 'cancelada' not in ultima_ocorrencia_str:
-                if any(termo in ultima_ocorrencia_str for termo in ['pedido entregue', 'entregue', '6']):
-                    is_entregue = True
-        
-        if not is_entregue and record_dict.get('ro_status_entrega'):
-            status_str = str(record_dict['ro_status_entrega']).lower()
-            if any(termo in status_str for termo in ['pedido entregue', 'entregue', '6']):
-                is_entregue = True
-        
-        if not is_entregue and record_dict.get('ro_data_entrega'):
-            is_entregue = True
-        
-        if not is_entregue and record_dict.get('ro_iccid'):
-            iccid_str = str(record_dict['ro_iccid']).strip()
-            if iccid_str and iccid_str.lower() != 'nan':
-                is_entregue = True
-        
-        # PRIORIDADE 2: Verificar no ObjectsLoader se ainda não encontrou
-        if not is_entregue and objects_loader:
-            obj_match = objects_loader.find_best_match(
-                codigo_externo=record.codigo_externo,
-                cpf=record.cpf
-            )
-            if obj_match:
-                if hasattr(obj_match, 'ultima_ocorrencia') and obj_match.ultima_ocorrencia:
-                    ultima_ocorrencia_str = str(obj_match.ultima_ocorrencia).lower()
-                    if 'entrega cancelada' not in ultima_ocorrencia_str and 'cancelada' not in ultima_ocorrencia_str:
-                        if any(termo in ultima_ocorrencia_str for termo in ['pedido entregue', 'entregue', '6']):
-                            is_entregue = True
-                
-                if not is_entregue and hasattr(obj_match, 'status') and obj_match.status:
-                    status_str = str(obj_match.status).lower()
-                    if any(termo in status_str for termo in ['pedido entregue', 'entregue', '6']):
+                )
+            except Exception as e:
+                logger.error(f"Erro ao criar record: {e} - Dados: {record_dict}")
+                pbar.update(1)
+                continue
+            
+            # Verificar Status da ordem: deve ser "Em Aprovisionamento" (não "Erro no Aprovisionamento")
+            status_ordem_valido = False
+            if record.status_ordem:
+                status_ordem_str = str(record.status_ordem.value if hasattr(record.status_ordem, 'value') else record.status_ordem)
+                if 'Em Aprovisionamento' in status_ordem_str and 'Erro' not in status_ordem_str:
+                    status_ordem_valido = True
+            
+            if not status_ordem_valido:
+                pbar.update(1)
+                continue
+            
+            # EXCLUIR registros com motivos específicos
+            motivo_recusa = str(record.motivo_recusa or '').strip()
+            motivo_cancelamento = str(record.motivo_cancelamento or '').strip()
+            
+            motivos_excluir = [
+                'Rejeição do Cliente via SMS',
+                'CPF Inválido',
+                'Portabilidade de Número Vago',
+                'Portabillidade de Número Vago',  # Com erro de digitação
+                'Tipo de cliente inválido'
+            ]
+            
+            deve_excluir = False
+            for motivo in motivos_excluir:
+                if motivo.lower() in motivo_recusa.lower() or motivo.lower() in motivo_cancelamento.lower():
+                    deve_excluir = True
+                    break
+            
+            if deve_excluir:
+                pbar.update(1)
+                continue
+            
+            # Verificar se está entregue usando dados sincronizados
+            is_entregue = False
+            
+            if record_dict.get('ro_ultima_ocorrencia'):
+                ultima_ocorrencia_str = str(record_dict['ro_ultima_ocorrencia']).lower()
+                if 'entrega cancelada' not in ultima_ocorrencia_str and 'cancelada' not in ultima_ocorrencia_str:
+                    if any(termo in ultima_ocorrencia_str for termo in ['pedido entregue', 'entregue', '6']):
                         is_entregue = True
-                
-                if not is_entregue and hasattr(obj_match, 'data_entrega') and obj_match.data_entrega:
+            
+            if not is_entregue and record_dict.get('ro_status_entrega'):
+                status_str = str(record_dict['ro_status_entrega']).lower()
+                if any(termo in status_str for termo in ['pedido entregue', 'entregue', '6']):
                     is_entregue = True
-                
-                if not is_entregue:
-                    if hasattr(obj_match, 'iccid') and obj_match.iccid:
+            
+            if not is_entregue and record_dict.get('ro_data_entrega'):
+                is_entregue = True
+            
+            if not is_entregue and record_dict.get('ro_iccid'):
+                iccid_str = str(record_dict['ro_iccid']).strip()
+                if iccid_str and iccid_str.lower() != 'nan':
+                    is_entregue = True
+            
+            if not is_entregue and objects_loader:
+                obj_match = objects_loader.find_best_match(
+                    codigo_externo=record.codigo_externo,
+                    cpf=record.cpf
+                )
+                if obj_match:
+                    if hasattr(obj_match, 'ultima_ocorrencia') and obj_match.ultima_ocorrencia:
+                        ultima_ocorrencia_str = str(obj_match.ultima_ocorrencia).lower()
+                        if 'entrega cancelada' not in ultima_ocorrencia_str and 'cancelada' not in ultima_ocorrencia_str:
+                            if any(termo in ultima_ocorrencia_str for termo in ['pedido entregue', 'entregue', '6']):
+                                is_entregue = True
+                    
+                    if not is_entregue and hasattr(obj_match, 'status') and obj_match.status:
+                        status_str = str(obj_match.status).lower()
+                        if any(termo in status_str for termo in ['pedido entregue', 'entregue', '6']):
+                            is_entregue = True
+                    
+                    if not is_entregue and hasattr(obj_match, 'data_entrega') and obj_match.data_entrega:
+                        is_entregue = True
+                    
+                    if not is_entregue and hasattr(obj_match, 'iccid') and obj_match.iccid:
                         iccid_str = str(obj_match.iccid).strip()
                         if iccid_str and iccid_str.lower() != 'nan':
                             is_entregue = True
-        
-        # Aplicar filtro: aprovisionamento E entregue
-        if is_entregue:
-            aprovisionados_entregues.append(record)
+            
+            if is_entregue:
+                aprovisionados_entregues.append(record)
+            
+            pbar.update(1)
+            pbar.set_postfix(entregues=len(aprovisionados_entregues), total=len(rows))
     
     print(f"    >> {len(aprovisionados_entregues)} registros em aprovisionamento E entregues")
     

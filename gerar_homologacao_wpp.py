@@ -49,6 +49,8 @@ from src.database.db_manager import DatabaseManager
 from src.utils.templates_wpp import TemplateMapper, TEMPLATES
 from src.utils.objects_loader import ObjectsLoader
 from src.models.portabilidade import PortabilidadeRecord
+from src.utils.validar_processamento import filtrar_registros_validos, obter_estatisticas_validacao
+from src.utils.progress_bar import ProgressBar, log_progress
 from typing import Dict, Optional
 import pandas as pd
 
@@ -82,7 +84,7 @@ MAX_ENVIOS_POR_CLIENTE = 5  # Máximo de envios tipo 1 ou 2 antes de bloquear
 # CONFIGURAÇÃO DE CONTROLE DE ENVIOS
 # =============================================================================
 MAX_TENTATIVAS_TEMPLATE = 5  # Máximo de tentativas por template 1 ou 2
-HORAS_ENTRE_ENVIOS = 24  # Horas mínimas entre envios para o mesmo cliente
+HORAS_ENTRE_ENVIOS = 48  # Horas mínimas entre envios para o mesmo cliente (48h conforme solicitado)
 
 # =============================================================================
 # ARQUIVO DE IDs PARA FORÇAR INCLUSÃO NO WPP
@@ -200,9 +202,10 @@ def verificar_historico_cliente(
     Verifica o histórico de envios de um cliente e determina o Tipo_Comunicacao correto.
     
     Regras:
-    1. Se último Tipo_Comunicacao = 1 e novo = 1 → retorna 2
-    2. Se total de envios com tipo 1 ou 2 >= 5 → retorna 0 (não enviar)
-    3. Caso contrário, mantém o tipo original
+    1. Se enviou nas últimas 48 horas → retorna 0 (não enviar, aguardar próxima atualização)
+    2. Se último Tipo_Comunicacao = 1 e novo = 1 → retorna 2
+    3. Se total de envios com tipo 1 ou 2 >= 5 → retorna 0 (não enviar)
+    4. Caso contrário, mantém o tipo original
     
     Args:
         proposta_isize: Código da proposta
@@ -229,11 +232,44 @@ def verificar_historico_cliente(
     if cpf_str and 'Cpf' in historico_df.columns:
         mask = mask | (historico_df['Cpf'].astype(str).str.strip() == cpf_str)
     
-    registros_cliente = historico_df[mask]
+    registros_cliente = historico_df[mask].copy()
     
     if registros_cliente.empty:
         # Cliente nunca recebeu mensagem
         return tipo_comunicacao_novo
+    
+    # Regra 1: Verificar se houve envio nas últimas 48 horas (considerando data e hora do disparo)
+    agora = datetime.now()
+    if 'DataHora_Disparo' in registros_cliente.columns:
+        # Tentar parsear data/hora do disparo
+        for idx, row in registros_cliente.iterrows():
+            data_disparo_str = str(row.get('DataHora_Disparo', '')).strip()
+            if not data_disparo_str or data_disparo_str in ['', 'None', 'nan']:
+                continue
+            
+            try:
+                # Tentar diferentes formatos de data/hora
+                for fmt in [
+                    '%Y-%m-%d %H:%M:%S',
+                    '%d/%m/%Y %H:%M:%S',
+                    '%Y-%m-%d',
+                    '%d/%m/%Y',
+                    '%Y-%m-%d %H:%M',
+                    '%d/%m/%Y %H:%M'
+                ]:
+                    try:
+                        data_disparo = datetime.strptime(data_disparo_str[:19] if len(data_disparo_str) > 19 else data_disparo_str, fmt)
+                        horas_decorridas = (agora - data_disparo).total_seconds() / 3600
+                        
+                        # Se enviou nas últimas 48 horas, não enviar novamente
+                        if horas_decorridas < HORAS_ENTRE_ENVIOS:
+                            logger.debug(f"[GSHEET] Cliente {proposta_str or cpf_str}: enviado há {horas_decorridas:.1f}h → Tipo 0 (aguardar 48h)")
+                            return 0
+                        break
+                    except ValueError:
+                        continue
+            except Exception as e:
+                logger.debug(f"[GSHEET] Erro ao parsear data_disparo '{data_disparo_str}': {e}")
     
     # Contar envios com tipo 1 ou 2
     if 'Tipo_Comunicacao' in registros_cliente.columns:
@@ -243,7 +279,7 @@ def verificar_historico_cliente(
         # Contar envios efetivos (tipo 1 ou 2)
         total_envios_efetivos = ((tipos == 1) | (tipos == 2)).sum()
         
-        # Regra 2: Se já enviamos 5 vezes, não enviar mais
+        # Regra 3: Se já enviamos 5 vezes, não enviar mais
         if total_envios_efetivos >= MAX_ENVIOS_POR_CLIENTE:
             logger.debug(f"[GSHEET] Cliente {proposta_str or cpf_str}: {total_envios_efetivos} envios → Tipo 0 (bloqueado)")
             return 0
@@ -251,7 +287,7 @@ def verificar_historico_cliente(
         # Pegar último tipo de comunicação
         ultimo_tipo = tipos.iloc[-1] if len(tipos) > 0 else 0
         
-        # Regra 1: Se último foi 1 e novo é 1, classificar como 2
+        # Regra 2: Se último foi 1 e novo é 1, classificar como 2
         if ultimo_tipo == 1 and tipo_comunicacao_novo == 1:
             logger.debug(f"[GSHEET] Cliente {proposta_str or cpf_str}: último=1, novo=1 → Tipo 2")
             return 2
@@ -881,82 +917,171 @@ def gerar_arquivo_homologacao():
         else:
             print("    >> Tabela base_coverte_prop não encontrada, usando apenas portabilidade_records")
         
-        # Buscar registros ÚNICOS por codigo_externo, priorizando base_coverte_prop como fonte principal
-        # Remove duplicados usando GROUP BY garantindo um único registro por codigo_externo
-        # FILTRO: Apenas clientes com crivo_vendas = "APROVADA"
+        # Buscar registros ÚNICOS por codigo_externo E telefone_portado
+        # Remove duplicados garantindo um único registro por (codigo_externo, telefone_portado)
+        # FILTROS:
+        # - Apenas vendas com telefone_portado (não nova linha)
+        # - Excluir entregas canceladas/extraviadas
+        # - Apenas clientes com crivo_vendas = "APROVADA" (ou IDs forçados)
         if tem_base_coverte:
             query = """
-            SELECT 
+            WITH registros_filtrados AS (
+                SELECT 
                 -- Dados de portabilidade_records
-                MAX(pr.id) AS id, 
-                COALESCE(MAX(bc.cpf), MAX(pr.cpf)""" + (", MAX(ro.documento)" if tem_relatorio_objetos else "") + """, '') AS cpf,
-                COALESCE(MAX(pr.numero_acesso), '') AS numero_acesso,
-                COALESCE(MAX(bc.numero_ordem), MAX(pr.numero_ordem), '') AS numero_ordem,
+                    pr.id AS pr_id,
+                COALESCE(bc.cpf, pr.cpf""" + (", ro.documento" if tem_relatorio_objetos else "") + """, '') AS cpf,
+                COALESCE(pr.numero_acesso, '') AS numero_acesso,
+                    COALESCE(bc.numero_ordem, pr.numero_ordem, '') AS numero_ordem,
                 COALESCE(bc.proposta_isize, bc.codigo_externo, pr.codigo_externo""" + (", ro.codigo_externo" if tem_relatorio_objetos else "") + """, '') AS codigo_externo,
                 
-                -- Template e regras (priorizar dados existentes)
-                COALESCE(MAX(pr.tipo_mensagem), '') AS tipo_mensagem,
-                COALESCE(MAX(pr.template), '1') AS template,
-                MAX(pr.regra_id) AS regra_id,
-                COALESCE(MAX(pr.o_que_aconteceu), '') AS o_que_aconteceu,
-                COALESCE(MAX(pr.acao_a_realizar), '') AS acao_a_realizar,
-                
-                -- Dados adicionais de base_coverte_prop (FONTE PRINCIPAL)
-                MAX(bc.cliente_nome) AS cliente_nome,
-                MAX(bc.telefone_portado) AS telefone_portado,
-                MAX(bc.data_venda) AS data_venda,
-                MAX(bc.plano) AS plano,
-                MAX(bc.endereco) AS endereco,
-                MAX(bc.numero) AS numero,
-                MAX(bc.complemento) AS complemento,
-                MAX(bc.bairro) AS bairro,
-                MAX(bc.cidade) AS cidade,
-                MAX(bc.uf) AS uf,
-                MAX(bc.cep) AS cep,
-                MAX(bc.ponto_referencia) AS ponto_referencia,
-                MAX(bc.crivo_vendas) AS crivo_vendas,
+                    -- Template e regras (priorizar dados existentes)
+                    COALESCE(pr.tipo_mensagem, '') AS tipo_mensagem,
+                    COALESCE(pr.template, '1') AS template,
+                    pr.regra_id AS regra_id,
+                    COALESCE(pr.o_que_aconteceu, '') AS o_que_aconteceu,
+                    COALESCE(pr.acao_a_realizar, '') AS acao_a_realizar,
+                    
+                    -- Dados adicionais de base_coverte_prop (FONTE PRINCIPAL)
+                    bc.cliente_nome AS cliente_nome,
+                    bc.telefone_portado AS telefone_portado,
+                    bc.data_venda AS data_venda,
+                    bc.data_conectada AS data_conectada,
+                    bc.plano AS plano,
+                    bc.endereco AS endereco,
+                    bc.numero AS numero,
+                    bc.complemento AS complemento,
+                    bc.bairro AS bairro,
+                    bc.cidade AS cidade,
+                    bc.uf AS uf,
+                    bc.cep AS cep,
+                    bc.ponto_referencia AS ponto_referencia,
+                    bc.crivo_vendas AS crivo_vendas,
+                    
+                    -- Status de entrega (para filtrar canceladas/extraviadas)
+                    COALESCE(bc.status_correios, bc.status_loggi, bc.status_entrega_prevista, '') AS status_entrega,
                 
                 -- Dados de logística (relatorio_objetos)
                 """ + ("""
-                MAX(ro.nu_pedido) AS nu_pedido,
-                MAX(ro.rastreio) AS rastreio,
-                MAX(ro.status) AS ro_status,
+                    ro.nu_pedido AS nu_pedido,
+                    ro.rastreio AS rastreio,
+                    ro.status AS ro_status,
                 """ if tem_relatorio_objetos else """
-                NULL AS nu_pedido,
-                NULL AS rastreio,
-                NULL AS ro_status,
+                    NULL AS nu_pedido,
+                    NULL AS rastreio,
+                    NULL AS ro_status,
                 """) + """
                 
-                -- Contadores para controle de duplicação/reclassificação
-                COUNT(DISTINCT pr.id) AS total_classificacoes,
-                CASE WHEN COUNT(DISTINCT pr.id) > 1 THEN 'SIM' ELSE 'NAO' END AS houve_reclassificacao
-                
-            FROM base_coverte_prop bc
-            LEFT JOIN portabilidade_records pr ON (
+                    -- Contagem de classificações por codigo_externo (calculado depois)
+                    COUNT(pr.id) OVER (PARTITION BY COALESCE(bc.proposta_isize, bc.codigo_externo, pr.codigo_externo""" + (", ro.codigo_externo" if tem_relatorio_objetos else "") + """, '')) AS total_classificacoes_raw,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY 
+                            COALESCE(bc.proposta_isize, bc.codigo_externo, pr.codigo_externo""" + (", ro.codigo_externo" if tem_relatorio_objetos else "") + """, ''),
+                            COALESCE(bc.telefone_portado, '')
+                        ORDER BY 
+                            CASE 
+                                WHEN bc.data_conectada IS NOT NULL 
+                                     AND TRIM(COALESCE(CAST(bc.data_conectada AS TEXT), '')) != ''
+                                     AND (SUBSTR(TRIM(CAST(bc.data_conectada AS TEXT)), 5, 1) = '-' OR LENGTH(TRIM(CAST(bc.data_conectada AS TEXT))) >= 10)
+                                     AND SUBSTR(TRIM(CAST(bc.data_conectada AS TEXT)), 1, 4) GLOB '[0-9][0-9][0-9][0-9]'
+                                THEN date(SUBSTR(TRIM(CAST(bc.data_conectada AS TEXT)), 1, 10))
+                                WHEN bc.data_conectada IS NOT NULL 
+                                     AND TRIM(COALESCE(CAST(bc.data_conectada AS TEXT), '')) != ''
+                                     AND LENGTH(TRIM(CAST(bc.data_conectada AS TEXT))) >= 10
+                                     AND SUBSTR(TRIM(CAST(bc.data_conectada AS TEXT)), 3, 1) = '/'
+                                     AND SUBSTR(TRIM(CAST(bc.data_conectada AS TEXT)), 6, 1) = '/'
+                                THEN date(
+                                    SUBSTR(TRIM(CAST(bc.data_conectada AS TEXT)), 7, 4) || '-' || 
+                                    SUBSTR(TRIM(CAST(bc.data_conectada AS TEXT)), 4, 2) || '-' || 
+                                    SUBSTR(TRIM(CAST(bc.data_conectada AS TEXT)), 1, 2)
+                                )
+                                ELSE date('1900-01-01')
+                            END DESC,
+                            pr.id DESC
+                    ) AS rn
+                    
+                FROM base_coverte_prop bc
+                LEFT JOIN portabilidade_records pr ON (
                 TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) = 
                 TRIM(COALESCE(CAST(pr.codigo_externo AS TEXT), ''))
             )
             """ + ("""
             LEFT JOIN relatorio_objetos ro ON (
-                TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) = 
+                    TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) = 
                 TRIM(COALESCE(CAST(ro.codigo_externo AS TEXT), ''))
             )
-            """ if tem_relatorio_objetos else "") + """
-            WHERE bc.proposta_isize IS NOT NULL 
-              AND TRIM(COALESCE(bc.proposta_isize, bc.codigo_externo, '')) != ''
-              AND (
-                  -- Registros normais: crivo_vendas = APROVADA com template
-                  (
-                      UPPER(TRIM(COALESCE(CAST(bc.crivo_vendas AS TEXT), ''))) = 'APROVADA'
-                      AND (pr.template IS NOT NULL OR bc.data_venda >= '2026-01-01')
+                """ if tem_relatorio_objetos else "") + """
+                WHERE bc.proposta_isize IS NOT NULL 
+                  AND TRIM(COALESCE(bc.proposta_isize, bc.codigo_externo, '')) != ''
+                  -- FILTRO: Apenas vendas com telefone_portado (não nova linha)
+                  AND bc.telefone_portado IS NOT NULL 
+                  AND TRIM(COALESCE(bc.telefone_portado, '')) != ''
+                  -- FILTRO: Excluir entregas canceladas ou extraviadas
+                  AND UPPER(TRIM(COALESCE(bc.status_correios, bc.status_loggi, bc.status_entrega_prevista, ''))) NOT IN ('CANCELADA', 'CANCELADO', 'EXTRAVIADA', 'EXTRAVIADO', 'EXTRAVIO')
+                  AND (
+                      -- Registros normais: crivo_vendas = APROVADA com template
+                      (
+                          UPPER(TRIM(COALESCE(CAST(bc.crivo_vendas AS TEXT), ''))) = 'APROVADA'
+                          AND (pr.template IS NOT NULL OR bc.data_venda >= '2026-01-01')
+                      )
+                      """ + (f"""
+                      -- IDs forçados: incluir independente de crivo_vendas ou template
+                      OR TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) IN ({','.join([repr(id) for id in ids_forcar_wpp])})
+                      """ if ids_forcar_wpp else "") + """
                   )
-                  """ + (f"""
-                  -- IDs forçados: incluir independente de crivo_vendas ou template
-                  OR TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) IN ({','.join([repr(id) for id in ids_forcar_wpp])})
-                  """ if ids_forcar_wpp else "") + """
-              )
-            GROUP BY COALESCE(bc.proposta_isize, bc.codigo_externo, pr.codigo_externo""" + (", ro.codigo_externo" if tem_relatorio_objetos else "") + """, '')
-            ORDER BY MAX(bc.data_venda) DESC NULLS LAST
+            )
+            SELECT 
+                pr_id AS id,
+                cpf,
+                numero_acesso,
+                numero_ordem,
+                codigo_externo,
+                tipo_mensagem,
+                template,
+                regra_id,
+                o_que_aconteceu,
+                acao_a_realizar,
+                cliente_nome,
+                telefone_portado,
+                data_venda,
+                data_conectada,
+                plano,
+                endereco,
+                numero,
+                complemento,
+                bairro,
+                cidade,
+                uf,
+                cep,
+                ponto_referencia,
+                crivo_vendas,
+                status_entrega,
+                nu_pedido,
+                rastreio,
+                ro_status,
+                total_classificacoes_raw AS total_classificacoes,
+                CASE WHEN total_classificacoes_raw > 1 THEN 'SIM' ELSE 'NAO' END AS houve_reclassificacao
+            FROM registros_filtrados
+            WHERE rn = 1
+            ORDER BY 
+                CASE 
+                    WHEN data_conectada IS NOT NULL 
+                         AND TRIM(COALESCE(CAST(data_conectada AS TEXT), '')) != ''
+                         AND (SUBSTR(TRIM(CAST(data_conectada AS TEXT)), 5, 1) = '-' OR LENGTH(TRIM(CAST(data_conectada AS TEXT))) >= 10)
+                         AND SUBSTR(TRIM(CAST(data_conectada AS TEXT)), 1, 4) GLOB '[0-9][0-9][0-9][0-9]'
+                    THEN date(SUBSTR(TRIM(CAST(data_conectada AS TEXT)), 1, 10))
+                    WHEN data_conectada IS NOT NULL 
+                         AND TRIM(COALESCE(CAST(data_conectada AS TEXT), '')) != ''
+                         AND LENGTH(TRIM(CAST(data_conectada AS TEXT))) >= 10
+                         AND SUBSTR(TRIM(CAST(data_conectada AS TEXT)), 3, 1) = '/'
+                         AND SUBSTR(TRIM(CAST(data_conectada AS TEXT)), 6, 1) = '/'
+                    THEN date(
+                        SUBSTR(TRIM(CAST(data_conectada AS TEXT)), 7, 4) || '-' || 
+                        SUBSTR(TRIM(CAST(data_conectada AS TEXT)), 4, 2) || '-' || 
+                        SUBSTR(TRIM(CAST(data_conectada AS TEXT)), 1, 2)
+                    )
+                    ELSE date('1900-01-01')
+                END DESC,
+                id DESC
             LIMIT 10000
             """
         else:
@@ -1074,437 +1199,484 @@ def gerar_arquivo_homologacao():
     elif not tem_base_unificada:
         print(f"    >> Base analítica não encontrada (nem no banco nem em arquivo)")
     
-    for row in rows:
-        # Converter row para dict usando colunas
-        row_dict = dict(zip(columns, row))
+    # [2.3] Validar registros usando tabela portabilidade_processamento
+    print("[2.3] Validando registros com tabela portabilidade_processamento...")
+    try:
+        # Converter rows para lista de dicionários
+        registros_para_validar = []
+        for row in rows:
+            row_dict = dict(zip(columns, row))
+            registros_para_validar.append(row_dict)
         
-        # Criar registro básico usando dados sincronizados
-        record = PortabilidadeRecord(
-            cpf=str(row_dict.get('cpf', '') or '').strip(),
-            numero_acesso=str(row_dict.get('numero_acesso', '') or '').strip(),
-            numero_ordem=str(row_dict.get('numero_ordem', '') or '').strip(),
-            codigo_externo=str(row_dict.get('codigo_externo', '') or '').strip(),
-            tipo_mensagem=str(row_dict.get('tipo_mensagem', '') or '').strip(),
-            template=str(row_dict.get('template', '') or '').strip(),
-            regra_id=row_dict.get('regra_id'),
-            o_que_aconteceu=str(row_dict.get('o_que_aconteceu', '') or '').strip(),
-            acao_a_realizar=str(row_dict.get('acao_a_realizar', '') or '').strip(),
+        # Filtrar registros válidos
+        registros_validos, registros_invalidos = filtrar_registros_validos(
+            db_manager, registros_para_validar
         )
         
-        # Preencher dados adicionais de base_coverte_prop se disponíveis
-        if row_dict.get('cliente_nome'):
-            record.nome_cliente = str(row_dict['cliente_nome']).strip() if row_dict.get('cliente_nome') else ''
-        if row_dict.get('telefone_portado'):
-            record.telefone_contato = str(row_dict['telefone_portado']).strip()
-        if row_dict.get('data_venda'):
-            try:
-                from datetime import datetime as dt_parser
-                data_venda_str = str(row_dict['data_venda']).strip()
-                if data_venda_str:
-                    # Tentar parsear diferentes formatos
-                    for fmt in ['%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%d/%m/%Y', '%d/%m/%Y %H:%M:%S']:
-                        try:
-                            record.data_venda = dt_parser.strptime(data_venda_str[:19] if len(data_venda_str) > 19 else data_venda_str, fmt)
-                            break
-                        except ValueError:
-                            continue
-            except (ValueError, TypeError, AttributeError):
-                pass
+        # Estatísticas de validação
+        stats_validacao = obter_estatisticas_validacao(db_manager)
+        print(f"    >> {len(registros_validos)} registros válidos para processamento")
+        print(f"    >> {len(registros_invalidos)} registros inválidos (serão ignorados)")
+        if stats_validacao['total_registros'] > 0:
+            print(f"    >> Estatísticas da tabela portabilidade_processamento:")
+            print(f"       - Total: {stats_validacao['total_registros']}")
+            print(f"       - Válidos: {stats_validacao['validos']}")
+            print(f"       - Com conflito: {stats_validacao['com_conflito']}")
+            print(f"       - Com cancelamento: {stats_validacao['com_cancelamento']}")
         
-        # Preencher dados de endereço diretamente da query SQL (base_coverte_prop)
-        numero_bruto = str(row_dict.get('numero', '')).strip() if row_dict.get('numero') else ''
-        complemento_bruto = str(row_dict.get('complemento', '')).strip() if row_dict.get('complemento') else ''
+        # Usar apenas registros válidos
+        rows_validos = []
+        for registro in registros_validos:
+            # Reconstruir row no formato original
+            row_reconstruido = [registro.get(col, None) for col in columns]
+            rows_validos.append(row_reconstruido)
         
-        # Normalizar número e extrair complementos (sn, n/a, S/N -> 0, "150 B" -> numero=150, complemento=B)
-        numero_normalizado, complemento_atualizado = normalizar_numero_endereco(numero_bruto, complemento_bruto)
-        
-        endereco_data = {
-            'endereco': str(row_dict.get('endereco', '')).strip() if row_dict.get('endereco') else '',
-            'numero': numero_normalizado,
-            'complemento': complemento_atualizado,
-            'bairro': str(row_dict.get('bairro', '')).strip() if row_dict.get('bairro') else '',
-            'ponto_referencia': str(row_dict.get('ponto_referencia', '')).strip() if row_dict.get('ponto_referencia') else ''
-        }
-        
-        # Preencher cidade, UF e CEP diretamente da query SQL
-        if row_dict.get('cidade'):
-            record.cidade = str(row_dict['cidade']).strip()
-        if row_dict.get('uf'):
-            record.uf = str(row_dict['uf']).strip()
-        if row_dict.get('cep'):
-            record.cep = str(row_dict['cep']).strip()
-        
-        # Enriquecer com dados de logística - buscar TODOS os matches para garantir endereço completo (se não tiver na query)
-        
-        obj_match = None
-        nu_pedido_encontrado = None
-        
-        # Buscar dados de logística - usar find_best_match que busca em múltiplas fontes
-        if objects_loader:
-            # Tentar múltiplas estratégias de busca
+        rows = rows_validos
+        print(f"    >> Processando {len(rows)} registros válidos")
+    except Exception as e:
+        logger.warning(f"Erro ao validar registros (continuando sem validação): {e}")
+        print(f"    >> Aviso: Validação não pôde ser executada, processando todos os registros")
+    
+    # [4] Processar registros com barra de progresso
+    print("[4] Processando registros e gerando arquivo...")
+    total_registros = len(rows)
+    
+    with ProgressBar(
+        total=total_registros,
+        desc="Gerando homologação WPP",
+        unit="registros"
+    ) as pbar:
+        for row_idx, row in enumerate(rows, 1):
+            # Converter row para dict usando colunas
+            row_dict = dict(zip(columns, row))
             
-            # 1. Buscar por código externo direto
-            obj_match = objects_loader.find_best_match(
-                codigo_externo=record.codigo_externo,
-                cpf=record.cpf
+            # Criar registro básico usando dados sincronizados
+            record = PortabilidadeRecord(
+                cpf=str(row_dict.get('cpf', '') or '').strip(),
+                numero_acesso=str(row_dict.get('numero_acesso', '') or '').strip(),
+                numero_ordem=str(row_dict.get('numero_ordem', '') or '').strip(),
+                codigo_externo=str(row_dict.get('codigo_externo', '') or '').strip(),
+                tipo_mensagem=str(row_dict.get('tipo_mensagem', '') or '').strip(),
+                template=str(row_dict.get('template', '') or '').strip(),
+                regra_id=row_dict.get('regra_id'),
+                o_que_aconteceu=str(row_dict.get('o_que_aconteceu', '') or '').strip(),
+                acao_a_realizar=str(row_dict.get('acao_a_realizar', '') or '').strip(),
             )
             
-            # 2. Se não encontrou, tentar variações do código externo
-            if not obj_match and record.codigo_externo:
-                # Tentar com zeros à esquerda
-                codigo_variacoes = [
-                    record.codigo_externo,
-                    record.codigo_externo.zfill(8),
-                    record.codigo_externo.zfill(9),
-                    record.codigo_externo.lstrip('0'),
-                ]
-                for codigo_var in codigo_variacoes:
-                    if codigo_var != record.codigo_externo:
-                        obj_match = objects_loader.find_best_match(codigo_externo=codigo_var)
-                        if obj_match:
-                            break
+            # Preencher dados adicionais de base_coverte_prop se disponíveis
+            if row_dict.get('cliente_nome'):
+                record.nome_cliente = str(row_dict['cliente_nome']).strip() if row_dict.get('cliente_nome') else ''
+            if row_dict.get('telefone_portado'):
+                record.telefone_contato = str(row_dict['telefone_portado']).strip()
+            if row_dict.get('data_venda'):
+                try:
+                    from datetime import datetime as dt_parser
+                    data_venda_str = str(row_dict['data_venda']).strip()
+                    if data_venda_str:
+                        # Tentar parsear diferentes formatos
+                        for fmt in ['%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%d/%m/%Y', '%d/%m/%Y %H:%M:%S']:
+                            try:
+                                record.data_venda = dt_parser.strptime(data_venda_str[:19] if len(data_venda_str) > 19 else data_venda_str, fmt)
+                                break
+                            except ValueError:
+                                continue
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            
+            # Preencher dados de endereço diretamente da query SQL (base_coverte_prop)
+            numero_bruto = str(row_dict.get('numero', '')).strip() if row_dict.get('numero') else ''
+            complemento_bruto = str(row_dict.get('complemento', '')).strip() if row_dict.get('complemento') else ''
+            
+            # Normalizar número e extrair complementos (sn, n/a, S/N -> 0, "150 B" -> numero=150, complemento=B)
+            numero_normalizado, complemento_atualizado = normalizar_numero_endereco(numero_bruto, complemento_bruto)
+            
+            endereco_data = {
+                'endereco': str(row_dict.get('endereco', '')).strip() if row_dict.get('endereco') else '',
+                'numero': numero_normalizado,
+                'complemento': complemento_atualizado,
+                'bairro': str(row_dict.get('bairro', '')).strip() if row_dict.get('bairro') else '',
+                'ponto_referencia': str(row_dict.get('ponto_referencia', '')).strip() if row_dict.get('ponto_referencia') else ''
+            }
+            
+            # Preencher cidade, UF e CEP diretamente da query SQL
+            if row_dict.get('cidade'):
+                record.cidade = str(row_dict['cidade']).strip()
+            if row_dict.get('uf'):
+                record.uf = str(row_dict['uf']).strip()
+            if row_dict.get('cep'):
+                record.cep = str(row_dict['cep']).strip()
+            
+            # Enriquecer com dados de logística - buscar TODOS os matches para garantir endereço completo (se não tiver na query)
+            
+            obj_match = None
+            nu_pedido_encontrado = None
+            
+            # Buscar dados de logística - usar find_best_match que busca em múltiplas fontes
+            if objects_loader:
+                # Tentar múltiplas estratégias de busca
                 
-                # 3. Tentar buscar por nu_pedido usando o código externo
-                # IMPORTANTE: Se houver múltiplos pedidos, usar sempre o mais recente
-                if not obj_match and hasattr(objects_loader, '_index_by_nu_pedido'):
-                    # Coletar todos os matches primeiro
-                    matches_por_codigo = []
-                    codigo_target = str(record.codigo_externo).strip().lstrip('0')
-                    
-                    for nu_ped, obj in objects_loader._index_by_nu_pedido.items():
-                        codigo_obj = str(getattr(obj, 'codigo_externo', '')).strip().lstrip('0')
-                        # Verificar se o código externo do objeto corresponde
-                        if codigo_obj == codigo_target or \
-                           str(record.codigo_externo) in str(nu_ped) or \
-                           codigo_target in str(nu_ped):
-                            matches_por_codigo.append(obj)
-                    
-                    # Se encontrou múltiplos, escolher o mais recente por data
-                    if matches_por_codigo:
-                        # Ordenar por data de inserção ou criação (mais recente primeiro)
-                        matches_por_codigo.sort(
-                            key=lambda x: (
-                                x.data_insercao or x.data_criacao_pedido or datetime.min
-                            ),
-                            reverse=True
-                        )
-                        obj_match = matches_por_codigo[0]  # Pegar o mais recente
+                # 1. Buscar por código externo direto
+                obj_match = objects_loader.find_best_match(
+                    codigo_externo=record.codigo_externo,
+                    cpf=record.cpf
+                )
                 
-                # 4. Tentar buscar todos os registros por CPF e encontrar o que tem código externo próximo
-                # IMPORTANTE: Se houver múltiplos, usar sempre o mais recente
-                if not obj_match and record.cpf and hasattr(objects_loader, '_index_by_cpf'):
-                    matches = objects_loader._index_by_cpf.get(record.cpf, [])
-                    if matches:
-                        # Tentar encontrar o mais próximo do código externo
+                # 2. Se não encontrou, tentar variações do código externo
+                if not obj_match and record.codigo_externo:
+                    # Tentar com zeros à esquerda
+                    codigo_variacoes = [
+                        record.codigo_externo,
+                        record.codigo_externo.zfill(8),
+                        record.codigo_externo.zfill(9),
+                        record.codigo_externo.lstrip('0'),
+                    ]
+                    for codigo_var in codigo_variacoes:
+                        if codigo_var != record.codigo_externo:
+                            obj_match = objects_loader.find_best_match(codigo_externo=codigo_var)
+                            if obj_match:
+                                break
+                    
+                    # 3. Tentar buscar por nu_pedido usando o código externo
+                    # IMPORTANTE: Se houver múltiplos pedidos, usar sempre o mais recente
+                    if not obj_match and hasattr(objects_loader, '_index_by_nu_pedido'):
+                        # Coletar todos os matches primeiro
+                        matches_por_codigo = []
                         codigo_target = str(record.codigo_externo).strip().lstrip('0')
-                        matches_com_codigo = []
                         
-                        for match in matches:
-                            codigo_match = str(getattr(match, 'codigo_externo', '')).strip().lstrip('0')
-                            if codigo_match:
-                                # Verificar se códigos são exatamente iguais ou muito próximos
-                                if codigo_match == codigo_target or \
-                                   codigo_match.endswith(codigo_target[-6:]) or \
-                                   codigo_target.endswith(codigo_match[-6:]):
-                                    matches_com_codigo.append(match)
+                        for nu_ped, obj in objects_loader._index_by_nu_pedido.items():
+                            codigo_obj = str(getattr(obj, 'codigo_externo', '')).strip().lstrip('0')
+                            # Verificar se o código externo do objeto corresponde
+                            if codigo_obj == codigo_target or \
+                               str(record.codigo_externo) in str(nu_ped) or \
+                               codigo_target in str(nu_ped):
+                                matches_por_codigo.append(obj)
                         
-                        # Se encontrou matches com código similar, escolher o mais recente
-                        if matches_com_codigo:
-                            # Ordenar por data (mais recente primeiro)
-                            matches_com_codigo.sort(
+                        # Se encontrou múltiplos, escolher o mais recente por data
+                        if matches_por_codigo:
+                            # Ordenar por data de inserção ou criação (mais recente primeiro)
+                            matches_por_codigo.sort(
                                 key=lambda x: (
                                     x.data_insercao or x.data_criacao_pedido or datetime.min
                                 ),
                                 reverse=True
                             )
-                            obj_match = matches_com_codigo[0]  # Pegar o mais recente
-                        # Se não encontrou similar, usar o mais recente de todos (primeiro da lista, já ordenado)
-                        elif matches:
-                            obj_match = matches[0]  # Primeiro já é o mais recente (ordenado no load)
-            
-            # 5. Se ainda não encontrou e temos número de acesso, tentar buscar por ID ERP
-            if not obj_match and record.numero_acesso:
-                obj_match = objects_loader.find_by_id_erp(record.numero_acesso)
-            
-            # Se encontrou, preencher TODOS os dados
-            if obj_match:
-                # ObjectRecord usa 'destinatario' não 'nome_cliente'
-                record.nome_cliente = getattr(obj_match, 'destinatario', None) or getattr(obj_match, 'nome_cliente', None) or record.nome_cliente or ""
-                record.telefone_contato = getattr(obj_match, 'telefone', None) or getattr(obj_match, 'telefone_contato', None) or record.telefone_contato or ""
-                record.cidade = getattr(obj_match, 'cidade', None) or record.cidade or ""
-                record.uf = getattr(obj_match, 'uf', None) or record.uf or ""
-                record.cep = getattr(obj_match, 'cep', None) or record.cep or ""
-                record.data_venda = getattr(obj_match, 'data_criacao_pedido', None) or getattr(obj_match, 'data_venda', None) or record.data_venda
-                record.status_logistica = getattr(obj_match, 'status', None) or getattr(obj_match, 'status_logistica', None) or record.status_logistica or ""
-                
-                # Dados de endereço do ObjectRecord (normalizar número)
-                endereco_data['endereco'] = getattr(obj_match, 'endereco', '') or endereco_data['endereco'] or ''
-                
-                # Normalizar número do ObjectRecord
-                numero_obj = getattr(obj_match, 'numero', '') or ''
-                complemento_obj = getattr(obj_match, 'complemento', '') or ''
-                if numero_obj and not endereco_data['numero']:
-                    numero_norm, compl_norm = normalizar_numero_endereco(numero_obj, complemento_obj)
-                    endereco_data['numero'] = numero_norm
-                    if compl_norm and not endereco_data['complemento']:
-                        endereco_data['complemento'] = compl_norm
-                elif complemento_obj and not endereco_data['complemento']:
-                    endereco_data['complemento'] = complemento_obj
-                
-                endereco_data['bairro'] = getattr(obj_match, 'bairro', '') or endereco_data['bairro'] or ''
-                endereco_data['ponto_referencia'] = getattr(obj_match, 'ponto_referencia', '') or endereco_data['ponto_referencia'] or ''
-                
-                # Buscar nu_pedido para usar no link de rastreio
-                nu_pedido = getattr(obj_match, 'nu_pedido', None)
-                if nu_pedido:
-                    nu_pedido_str = str(nu_pedido).strip()
-                    if nu_pedido_str and not nu_pedido_str.startswith('http'):
-                        if '-' in nu_pedido_str and nu_pedido_str.startswith('26-'):
-                            nu_pedido_encontrado = nu_pedido_str
-                        elif '-' in nu_pedido_str:
-                            partes = nu_pedido_str.split('-', 1)
-                            if len(partes) > 1:
-                                nu_pedido_encontrado = f"26-{partes[1].zfill(8)}"
-                        else:
-                            nu_pedido_encontrado = f"26-{nu_pedido_str.zfill(8)}"
-        
-        # Buscar data de conexão no banco de dados (data_inicial_processamento ou Data Conectada)
-        data_conexao = None
-        if not record.data_venda:
-            with db_manager._get_connection() as conn:
-                cursor = conn.cursor()
-                # Buscar data_inicial_processamento (Data Conectada)
-                cursor.execute("""
-                    SELECT data_inicial_processamento, data_portabilidade 
-                    FROM portabilidade_records 
-                    WHERE codigo_externo = ? 
-                    LIMIT 1
-                """, (record.codigo_externo,))
-                result = cursor.fetchone()
-                if result:
-                    data_conexao = result[0] or result[1]  # data_inicial_processamento (Data Conectada) ou data_portabilidade
-                    if data_conexao:
-                        from datetime import datetime as dt_parser
-                        if isinstance(data_conexao, str):
-                            try:
-                                data_conexao = dt_parser.strptime(data_conexao, '%Y-%m-%d %H:%M:%S')
-                            except ValueError:
-                                try:
-                                    data_conexao = dt_parser.strptime(data_conexao, '%Y-%m-%d')
-                                except ValueError:
-                                    data_conexao = None
-                        record.data_venda = data_conexao
-        
-        # Buscar dados na base_coverte_prop (COVERTE BASE PROP) se disponível
-        base_coverte_match = None
-        if tem_base_coverte:
-            with db_manager._get_connection() as conn:
-                cursor = conn.cursor()
-                # Buscar por CPF, codigo_externo ou numero_ordem
-                cursor.execute("""
-                    SELECT * FROM base_coverte_prop
-                    WHERE (cpf = ? OR codigo_externo = ? OR numero_ordem = ?)
-                    LIMIT 1
-                """, (record.cpf or '', record.codigo_externo or '', record.numero_ordem or ''))
-                row = cursor.fetchone()
-                if row:
-                    # Converter para dict usando nomes das colunas
-                    col_names = [desc[0] for desc in cursor.description]
-                    base_coverte_match = dict(zip(col_names, row))
-        
-        # Sempre buscar na Base Analítica Final para preencher endereços e dados faltantes
-        base_match = None
-        if base_analitica_loader and base_analitica_loader.is_loaded:
-            # Buscar sempre (mesmo que já tenha alguns dados, pode ter endereço completo)
-            base_match = base_analitica_loader.find_best_match(
-                codigo_externo=record.codigo_externo,
-                cpf=record.cpf
-            )
-        
-        # Priorizar base_coverte_prop se disponível (é a fonte mais atual)
-        if base_coverte_match:
-            base_match = base_coverte_match
-        
-        if base_match:
-            
-            # Preencher dados que estão faltando
-            # Mapear colunas da base analítica ou base_coverte_prop
-            if not record.nome_cliente:
-                # Tentar diferentes nomes de coluna
-                nome = (base_match.get('Cliente') or 
-                       base_match.get('cliente_nome') or
-                       base_match.get('Destinatário') or
-                       base_match.get('destinatario'))
-                if nome and (not isinstance(nome, float) or not pd.isna(nome)):
-                    record.nome_cliente = str(nome).strip()
+                            obj_match = matches_por_codigo[0]  # Pegar o mais recente
                     
-                    # Preencher telefone da Base Analítica com PRIORIDADE ESPECÍFICA:
-                    # 1. PRIMEIRO: "Telefone Portabilidade" (se não vazio)
-                    # 2. SE VAZIO: DDD + Telefone normalizado (31988776655)
-                    
-                    telefone_final = None
-                    
-                    # PRIORIDADE 1: Telefone Portabilidade
-                    telefone_portabilidade = (base_match.get('Telefone Portabilidade') or 
-                                             base_match.get('telefone_portado') or
-                                             base_match.get('telefone_portabilidade'))
-                    if telefone_portabilidade and (not isinstance(telefone_portabilidade, float) or not pd.isna(telefone_portabilidade)):
-                        telefone_str = str(telefone_portabilidade).strip()
-                        # Remover ponto decimal se for número float
-                        if telefone_str.endswith('.0'):
-                            telefone_str = telefone_str[:-2]
-                        if telefone_str:
-                            telefone_final = telefone_str
-                    
-                    # PRIORIDADE 2: Se Telefone Portabilidade estiver vazio, usar DDD + Telefone
-                    if not telefone_final:
-                        # Buscar DDD
-                        ddd = None
-                        for col_name in ['DDD', 'DDD.1']:
-                            ddd_val = base_match.get(col_name)
-                            if pd.notna(ddd_val) and ddd_val:
-                                ddd_str = str(ddd_val).strip()
-                                # Remover ponto decimal se for número float
-                                if ddd_str.endswith('.0'):
-                                    ddd_str = ddd_str[:-2]
-                                if ddd_str:
-                                    ddd = ddd_str
-                                    break
-                        
-                        # Buscar Telefone (não portabilidade)
-                        telefone_normal = None
-                        for col_name in ['Telefone', 'Telefone.1']:
-                            telefone_val = base_match.get(col_name)
-                            if pd.notna(telefone_val) and telefone_val:
-                                telefone_str = str(telefone_val).strip()
-                                # Remover ponto decimal se for número float
-                                if telefone_str.endswith('.0'):
-                                    telefone_str = telefone_str[:-2]
-                                if telefone_str:
-                                    telefone_normal = telefone_str
-                                    break
-                        
-                        # Combinar DDD + Telefone se ambos existirem
-                        if ddd and telefone_normal:
-                            # Limpar caracteres não numéricos
-                            ddd_digitos = ''.join(filter(str.isdigit, ddd))
-                            telefone_digitos = ''.join(filter(str.isdigit, telefone_normal))
+                    # 4. Tentar buscar todos os registros por CPF e encontrar o que tem código externo próximo
+                    # IMPORTANTE: Se houver múltiplos, usar sempre o mais recente
+                    if not obj_match and record.cpf and hasattr(objects_loader, '_index_by_cpf'):
+                        matches = objects_loader._index_by_cpf.get(record.cpf, [])
+                        if matches:
+                            # Tentar encontrar o mais próximo do código externo
+                            codigo_target = str(record.codigo_externo).strip().lstrip('0')
+                            matches_com_codigo = []
                             
-                            # Combinar: DDD + Telefone
-                            telefone_combinado = ddd_digitos + telefone_digitos
-                            telefone_final = telefone_combinado
-                        elif telefone_normal:
-                            # Se só tem telefone sem DDD, usar apenas o telefone
-                            telefone_final = ''.join(filter(str.isdigit, telefone_normal))
+                            for match in matches:
+                                codigo_match = str(getattr(match, 'codigo_externo', '')).strip().lstrip('0')
+                                if codigo_match:
+                                    # Verificar se códigos são exatamente iguais ou muito próximos
+                                    if codigo_match == codigo_target or \
+                                       codigo_match.endswith(codigo_target[-6:]) or \
+                                       codigo_target.endswith(codigo_match[-6:]):
+                                        matches_com_codigo.append(match)
+                            
+                            # Se encontrou matches com código similar, escolher o mais recente
+                            if matches_com_codigo:
+                                # Ordenar por data (mais recente primeiro)
+                                matches_com_codigo.sort(
+                                    key=lambda x: (
+                                        x.data_insercao or x.data_criacao_pedido or datetime.min
+                                    ),
+                                    reverse=True
+                                )
+                                obj_match = matches_com_codigo[0]  # Pegar o mais recente
+                            # Se não encontrou similar, usar o mais recente de todos (primeiro da lista, já ordenado)
+                            elif matches:
+                                obj_match = matches[0]  # Primeiro já é o mais recente (ordenado no load)
+                
+                # 5. Se ainda não encontrou e temos número de acesso, tentar buscar por ID ERP
+                if not obj_match and record.numero_acesso:
+                    obj_match = objects_loader.find_by_id_erp(record.numero_acesso)
+                
+                # Se encontrou, preencher TODOS os dados
+                if obj_match:
+                    # ObjectRecord usa 'destinatario' não 'nome_cliente'
+                    record.nome_cliente = getattr(obj_match, 'destinatario', None) or getattr(obj_match, 'nome_cliente', None) or record.nome_cliente or ""
+                    record.telefone_contato = getattr(obj_match, 'telefone', None) or getattr(obj_match, 'telefone_contato', None) or record.telefone_contato or ""
+                    record.cidade = getattr(obj_match, 'cidade', None) or record.cidade or ""
+                    record.uf = getattr(obj_match, 'uf', None) or record.uf or ""
+                    record.cep = getattr(obj_match, 'cep', None) or record.cep or ""
+                    record.data_venda = getattr(obj_match, 'data_criacao_pedido', None) or getattr(obj_match, 'data_venda', None) or record.data_venda
+                    record.status_logistica = getattr(obj_match, 'status', None) or getattr(obj_match, 'status_logistica', None) or record.status_logistica or ""
                     
-                    # Se encontrou telefone, normalizar e atribuir
-                    if telefone_final:
-                        # Limpar caracteres não numéricos
-                        telefone_limpo = ''.join(filter(str.isdigit, telefone_final))
-                        # Normalizar telefone (garantir 11 dígitos)
-                        record.telefone_contato = normalizar_telefone(telefone_limpo)
+                    # Dados de endereço do ObjectRecord (normalizar número)
+                    endereco_data['endereco'] = getattr(obj_match, 'endereco', '') or endereco_data['endereco'] or ''
                     
-                    if not record.cidade:
-                        cidade = base_match.get('Cidade')
-                        if pd.notna(cidade) and cidade:
-                            record.cidade = str(cidade).strip()
-                    
-                    if not record.uf:
-                        uf = base_match.get('UF')
-                        if pd.notna(uf) and uf:
-                            record.uf = str(uf).strip()
-                    
-                    if not record.cep:
-                        cep = base_match.get('Cep') or base_match.get('CEP') or base_match.get('Cep')
-                        if pd.notna(cep) and cep:
-                            record.cep = str(cep).strip()
-                    
-                    # Buscar Data Conectada da base analítica
-                    if not record.data_venda:
-                        data_conectada = base_match.get('Data Conectada') or base_match.get('Data_Conectada') or base_match.get('Data Conectada')
-                        if pd.notna(data_conectada) and data_conectada:
-                            try:
-                                from datetime import datetime as dt_parser
-                                if isinstance(data_conectada, str):
-                                    try:
-                                        record.data_venda = dt_parser.strptime(data_conectada, '%d/%m/%Y')
-                                    except ValueError:
-                                        try:
-                                            record.data_venda = dt_parser.strptime(data_conectada, '%Y-%m-%d')
-                                        except ValueError:
-                                            pass
-                                elif hasattr(data_conectada, 'to_pydatetime'):
-                                    record.data_venda = data_conectada.to_pydatetime()
-                            except (ValueError, TypeError, AttributeError):
-                                pass
-                    
-                    # Preencher dados de endereço da Base Analítica (sempre, mesmo se já tiver algum dado)
-                    # Endereco
-                    endereco = base_match.get('Endereco') or base_match.get('Endereço') or base_match.get('Endereco')
-                    if pd.notna(endereco) and endereco and str(endereco).strip():
-                        endereco_data['endereco'] = str(endereco).strip()
-                    
-                    # Numero e Complemento (normalizar)
-                    numero = base_match.get('Numero') or base_match.get('Número') or base_match.get('Numero')
-                    complemento = base_match.get('Complemento')
-                    complemento_str = str(complemento).strip() if pd.notna(complemento) and complemento else ''
-                    
-                    if pd.notna(numero) and numero and str(numero).strip():
-                        numero_str = str(numero).strip()
-                        # Normalizar número e extrair complementos
-                        numero_norm, compl_norm = normalizar_numero_endereco(numero_str, complemento_str)
+                    # Normalizar número do ObjectRecord
+                    numero_obj = getattr(obj_match, 'numero', '') or ''
+                    complemento_obj = getattr(obj_match, 'complemento', '') or ''
+                    if numero_obj and not endereco_data['numero']:
+                        numero_norm, compl_norm = normalizar_numero_endereco(numero_obj, complemento_obj)
                         endereco_data['numero'] = numero_norm
-                        endereco_data['complemento'] = compl_norm
-                    elif complemento_str:
-                        endereco_data['complemento'] = complemento_str
+                        if compl_norm and not endereco_data['complemento']:
+                            endereco_data['complemento'] = compl_norm
+                    elif complemento_obj and not endereco_data['complemento']:
+                        endereco_data['complemento'] = complemento_obj
                     
-                    # Bairro
-                    bairro = base_match.get('Bairro')
-                    if pd.notna(bairro) and bairro and str(bairro).strip():
-                        endereco_data['bairro'] = str(bairro).strip()
+                    endereco_data['bairro'] = getattr(obj_match, 'bairro', '') or endereco_data['bairro'] or ''
+                    endereco_data['ponto_referencia'] = getattr(obj_match, 'ponto_referencia', '') or endereco_data['ponto_referencia'] or ''
                     
-                    # Ponto_Referencia
-                    ponto_ref = base_match.get('Ponto Referencia') or base_match.get('Ponto_Referencia') or base_match.get('Ponto Referência')
-                    if pd.notna(ponto_ref) and ponto_ref and str(ponto_ref).strip():
-                        endereco_data['ponto_referencia'] = str(ponto_ref).strip()
-                    
-                    if not record.data_venda:
-                        data = base_match.get('Data venda') or base_match.get('Data Conectada')
-                        if pd.notna(data) and data:
-                            try:
-                                from datetime import datetime as dt_parser
-                                if isinstance(data, str):
+                    # Buscar nu_pedido para usar no link de rastreio
+                    nu_pedido = getattr(obj_match, 'nu_pedido', None)
+                    if nu_pedido:
+                        nu_pedido_str = str(nu_pedido).strip()
+                        if nu_pedido_str and not nu_pedido_str.startswith('http'):
+                            if '-' in nu_pedido_str and nu_pedido_str.startswith('26-'):
+                                nu_pedido_encontrado = nu_pedido_str
+                            elif '-' in nu_pedido_str:
+                                partes = nu_pedido_str.split('-', 1)
+                                if len(partes) > 1:
+                                    nu_pedido_encontrado = f"26-{partes[1].zfill(8)}"
+                            else:
+                                nu_pedido_encontrado = f"26-{nu_pedido_str.zfill(8)}"
+            
+            # Buscar data de conexão no banco de dados (data_inicial_processamento ou Data Conectada)
+            data_conexao = None
+            if not record.data_venda:
+                with db_manager._get_connection() as conn:
+                    cursor = conn.cursor()
+                    # Buscar data_inicial_processamento (Data Conectada)
+                    cursor.execute("""
+                        SELECT data_inicial_processamento, data_portabilidade 
+                        FROM portabilidade_records 
+                        WHERE codigo_externo = ? 
+                        LIMIT 1
+                    """, (record.codigo_externo,))
+                    result = cursor.fetchone()
+                    if result:
+                        data_conexao = result[0] or result[1]  # data_inicial_processamento (Data Conectada) ou data_portabilidade
+                        if data_conexao:
+                            from datetime import datetime as dt_parser
+                            if isinstance(data_conexao, str):
+                                try:
+                                    data_conexao = dt_parser.strptime(data_conexao, '%Y-%m-%d %H:%M:%S')
+                                except ValueError:
                                     try:
-                                        record.data_venda = dt_parser.strptime(data, '%d/%m/%Y')
+                                        data_conexao = dt_parser.strptime(data_conexao, '%Y-%m-%d')
                                     except ValueError:
-                                        try:
-                                            record.data_venda = dt_parser.strptime(data, '%Y-%m-%d')
-                                        except ValueError:
-                                            pass
-                                elif hasattr(data, 'to_pydatetime'):
-                                    record.data_venda = data.to_pydatetime()
-                            except (ValueError, TypeError, AttributeError):
-                                pass
+                                        data_conexao = None
+                            record.data_venda = data_conexao
+            
+            # Buscar dados na base_coverte_prop (COVERTE BASE PROP) se disponível
+            base_coverte_match = None
+            if tem_base_coverte:
+                with db_manager._get_connection() as conn:
+                    cursor = conn.cursor()
+                    # Buscar por CPF, codigo_externo ou numero_ordem
+                    cursor.execute("""
+                        SELECT * FROM base_coverte_prop
+                        WHERE (cpf = ? OR codigo_externo = ? OR numero_ordem = ?)
+                        LIMIT 1
+                    """, (record.cpf or '', record.codigo_externo or '', record.numero_ordem or ''))
+                    row = cursor.fetchone()
+                    if row:
+                        # Converter para dict usando nomes das colunas
+                        col_names = [desc[0] for desc in cursor.description]
+                        base_coverte_match = dict(zip(col_names, row))
+        
+            # Sempre buscar na Base Analítica Final para preencher endereços e dados faltantes
+            base_match = None
+            if base_analitica_loader and base_analitica_loader.is_loaded:
+                # Buscar sempre (mesmo que já tenha alguns dados, pode ter endereço completo)
+                base_match = base_analitica_loader.find_best_match(
+                    codigo_externo=record.codigo_externo,
+                    cpf=record.cpf
+                )
+            
+            # Priorizar base_coverte_prop se disponível (é a fonte mais atual)
+            if base_coverte_match:
+                base_match = base_coverte_match
+            
+            if base_match:
+                # Preencher dados que estão faltando
+                # Mapear colunas da base analítica ou base_coverte_prop
+                if not record.nome_cliente:
+                    # Tentar diferentes nomes de coluna
+                    nome = (base_match.get('Cliente') or 
+                           base_match.get('cliente_nome') or
+                           base_match.get('Destinatário') or
+                           base_match.get('destinatario'))
+                    if nome and (not isinstance(nome, float) or not pd.isna(nome)):
+                        record.nome_cliente = str(nome).strip()
+                
+                # Preencher telefone da Base Analítica com PRIORIDADE ESPECÍFICA:
+                # 1. PRIMEIRO: "Telefone Portabilidade" (se não vazio)
+                # 2. SE VAZIO: DDD + Telefone normalizado (31988776655)
+                
+                telefone_final = None
+                
+                # PRIORIDADE 1: Telefone Portabilidade
+                telefone_portabilidade = (base_match.get('Telefone Portabilidade') or 
+                                         base_match.get('telefone_portado') or
+                                         base_match.get('telefone_portabilidade'))
+                if telefone_portabilidade and (not isinstance(telefone_portabilidade, float) or not pd.isna(telefone_portabilidade)):
+                    telefone_str = str(telefone_portabilidade).strip()
+                    # Remover ponto decimal se for número float
+                    if telefone_str.endswith('.0'):
+                        telefone_str = telefone_str[:-2]
+                    if telefone_str:
+                        telefone_final = telefone_str
+                
+                # PRIORIDADE 2: Se Telefone Portabilidade estiver vazio, usar DDD + Telefone
+                if not telefone_final:
+                    # Buscar DDD
+                    ddd = None
+                    for col_name in ['DDD', 'DDD.1']:
+                        ddd_val = base_match.get(col_name)
+                        if pd.notna(ddd_val) and ddd_val:
+                            ddd_str = str(ddd_val).strip()
+                            # Remover ponto decimal se for número float
+                            if ddd_str.endswith('.0'):
+                                ddd_str = ddd_str[:-2]
+                            if ddd_str:
+                                ddd = ddd_str
+                                break
                     
-                    # Buscar nu_pedido na base analítica se ainda não encontramos
-                    # A base analítica não tem nu_pedido diretamente, mas podemos usar o código externo
-                    # O nu_pedido já foi buscado do ObjectsLoader se disponível
-        
-        # Formatar link de rastreio completo
-        if nu_pedido_encontrado:
-            # Usar o nu_pedido que já encontramos
-            link_rastreio = f"https://tim.trakin.co/o/{nu_pedido_encontrado}"
-        else:
-            # Se não encontrou, formatar usando código externo
-            codigo_limpo = str(record.codigo_externo).strip().lstrip('0')
-            if not codigo_limpo:
-                codigo_limpo = "0"
-            numero_formatado = codigo_limpo.zfill(8)
-            nu_pedido_fallback = f"26-{numero_formatado}"
-            link_rastreio = f"https://tim.trakin.co/o/{nu_pedido_fallback}"
-        
-        # Preparar dados completos para o template (incluindo endereço)
-        record_data_completo = {
+                    # Buscar Telefone (não portabilidade)
+                    telefone_normal = None
+                    for col_name in ['Telefone', 'Telefone.1']:
+                        telefone_val = base_match.get(col_name)
+                        if pd.notna(telefone_val) and telefone_val:
+                            telefone_str = str(telefone_val).strip()
+                            # Remover ponto decimal se for número float
+                            if telefone_str.endswith('.0'):
+                                telefone_str = telefone_str[:-2]
+                            if telefone_str:
+                                telefone_normal = telefone_str
+                                break
+                    
+                    # Combinar DDD + Telefone se ambos existirem
+                    if ddd and telefone_normal:
+                        # Limpar caracteres não numéricos
+                        ddd_digitos = ''.join(filter(str.isdigit, ddd))
+                        telefone_digitos = ''.join(filter(str.isdigit, telefone_normal))
+                        
+                        # Combinar: DDD + Telefone
+                        telefone_combinado = ddd_digitos + telefone_digitos
+                        telefone_final = telefone_combinado
+                    elif telefone_normal:
+                        # Se só tem telefone sem DDD, usar apenas o telefone
+                        telefone_final = ''.join(filter(str.isdigit, telefone_normal))
+                
+                # Se encontrou telefone, normalizar e atribuir
+                if telefone_final:
+                    # Limpar caracteres não numéricos
+                    telefone_limpo = ''.join(filter(str.isdigit, telefone_final))
+                    # Normalizar telefone (garantir 11 dígitos)
+                    record.telefone_contato = normalizar_telefone(telefone_limpo)
+                
+                if not record.cidade:
+                    cidade = base_match.get('Cidade')
+                    if pd.notna(cidade) and cidade:
+                        record.cidade = str(cidade).strip()
+                
+                if not record.uf:
+                    uf = base_match.get('UF')
+                    if pd.notna(uf) and uf:
+                        record.uf = str(uf).strip()
+                
+                if not record.cep:
+                    cep = base_match.get('Cep') or base_match.get('CEP') or base_match.get('Cep')
+                    if pd.notna(cep) and cep:
+                        record.cep = str(cep).strip()
+                
+                # Buscar Data Conectada da base analítica
+                if not record.data_venda:
+                    data_conectada = base_match.get('Data Conectada') or base_match.get('Data_Conectada') or base_match.get('Data Conectada')
+                    if pd.notna(data_conectada) and data_conectada:
+                        try:
+                            from datetime import datetime as dt_parser
+                            if isinstance(data_conectada, str):
+                                try:
+                                    record.data_venda = dt_parser.strptime(data_conectada, '%d/%m/%Y')
+                                except ValueError:
+                                    try:
+                                        record.data_venda = dt_parser.strptime(data_conectada, '%Y-%m-%d')
+                                    except ValueError:
+                                        pass
+                            elif hasattr(data_conectada, 'to_pydatetime'):
+                                record.data_venda = data_conectada.to_pydatetime()
+                        except (ValueError, TypeError, AttributeError):
+                            pass
+                
+                # Preencher dados de endereço da Base Analítica (sempre, mesmo se já tiver algum dado)
+                # Endereco
+                endereco = base_match.get('Endereco') or base_match.get('Endereço') or base_match.get('Endereco')
+                if pd.notna(endereco) and endereco and str(endereco).strip():
+                    endereco_data['endereco'] = str(endereco).strip()
+                
+                # Numero e Complemento (normalizar)
+                numero = base_match.get('Numero') or base_match.get('Número') or base_match.get('Numero')
+                complemento = base_match.get('Complemento')
+                complemento_str = str(complemento).strip() if pd.notna(complemento) and complemento else ''
+                
+                if pd.notna(numero) and numero and str(numero).strip():
+                    numero_str = str(numero).strip()
+                    # Normalizar número e extrair complementos
+                    numero_norm, compl_norm = normalizar_numero_endereco(numero_str, complemento_str)
+                    endereco_data['numero'] = numero_norm
+                    if compl_norm:
+                        endereco_data['complemento'] = compl_norm
+                elif complemento_str:
+                    endereco_data['complemento'] = complemento_str
+                
+                # Bairro
+                bairro = base_match.get('Bairro')
+                if pd.notna(bairro) and bairro and str(bairro).strip():
+                    endereco_data['bairro'] = str(bairro).strip()
+                
+                # Ponto_Referencia
+                ponto_ref = base_match.get('Ponto Referencia') or base_match.get('Ponto_Referencia') or base_match.get('Ponto Referência')
+                if pd.notna(ponto_ref) and ponto_ref and str(ponto_ref).strip():
+                    endereco_data['ponto_referencia'] = str(ponto_ref).strip()
+                
+                if not record.data_venda:
+                    data = base_match.get('Data venda') or base_match.get('Data Conectada')
+                    if pd.notna(data) and data:
+                        try:
+                            from datetime import datetime as dt_parser
+                            if isinstance(data, str):
+                                try:
+                                    record.data_venda = dt_parser.strptime(data, '%d/%m/%Y')
+                                except ValueError:
+                                    try:
+                                        record.data_venda = dt_parser.strptime(data, '%Y-%m-%d')
+                                    except ValueError:
+                                        pass
+                            elif hasattr(data, 'to_pydatetime'):
+                                record.data_venda = data.to_pydatetime()
+                        except (ValueError, TypeError, AttributeError):
+                            pass
+                
+                # Buscar nu_pedido na base analítica se ainda não encontramos
+                # A base analítica não tem nu_pedido diretamente, mas podemos usar o código externo
+                # O nu_pedido já foi buscado do ObjectsLoader se disponível
+            
+            # Formatar link de rastreio completo
+            if nu_pedido_encontrado:
+                # Usar o nu_pedido que já encontramos
+                link_rastreio = f"https://tim.trakin.co/o/{nu_pedido_encontrado}"
+            else:
+                # Se não encontrou, formatar usando código externo
+                codigo_limpo = str(record.codigo_externo).strip().lstrip('0')
+                if not codigo_limpo:
+                    codigo_limpo = "0"
+                numero_formatado = codigo_limpo.zfill(8)
+                nu_pedido_fallback = f"26-{numero_formatado}"
+                link_rastreio = f"https://tim.trakin.co/o/{nu_pedido_fallback}"
+            
+            # Preparar dados completos para o template (incluindo endereço)
+            record_data_completo = {
             "nome_cliente": extrair_primeiro_ultimo_nome(record.nome_cliente or ""),
             "cod_rastreio": link_rastreio,  # Link completo
             "endereco": endereco_data['endereco'],
@@ -1514,140 +1686,176 @@ def gerar_arquivo_homologacao():
             "cidade": record.cidade or "",
             "uf": record.uf or "",
             "cep": record.cep or "",
-            "ponto_referencia": endereco_data['ponto_referencia'],
-        }
-        
-        # Obter informações do template
-        template_info = TemplateMapper.get_template_for_record(record)
-        template_id = template_info.get('template_id')
-        
-        if not template_id:
-            continue
-        
-        # Estatísticas
-        template_stats[template_id] = template_stats.get(template_id, 0) + 1
-        
-        # Obter configuração do template
-        template_config = TEMPLATES.get(template_id)
-        if not template_config:
-            continue
-        
-        # Gerar variáveis com dados completos
-        variaveis_dict = TemplateMapper.generate_variables(template_id, record_data_completo)
-        
-        # Obter corpo da mensagem do banco
-        corpo_mensagem = obter_corpo_mensagem_template(db_manager, template_id)
-        
-        # Substituir variáveis na mensagem
-        mensagem_preview = substituir_variaveis_mensagem(corpo_mensagem, variaveis_dict)
-        
-        # Formatar variáveis para exibição
-        variaveis_str = TemplateMapper.format_variables_string(variaveis_dict)
-        
-        # Extrair primeiro e último nome
-        nome_completo = record.nome_cliente or ''
-        nome_cliente_formatado = extrair_primeiro_ultimo_nome(nome_completo)
-        
-        # Normalizar telefone (11 dígitos)
-        # Buscar telefone de múltiplas fontes
-        telefone_origem = record.telefone_contato or record.numero_acesso or ""
-        telefone_contato = normalizar_telefone(telefone_origem)
-        
-        # Normalizar CEP (8 dígitos)
-        cep_normalizado = normalizar_cep(record.cep or "")
-        
-        # Normalizar Data_Venda (DD/MM/AAAA) - usar Data Conectada
-        data_venda_formatada = normalizar_data_venda(record.data_venda)
-        
-        # Tipo_Comunicacao: usar Template_Triggers, substituir "EM CRIAÇÃO" por "1"
-        template_triggers = record.template or ''
-        tipo_comunicacao = template_triggers
-        if template_triggers.upper() in ['EM CRIAÇÃO', 'EM CRIACAO', 'EM_CRIACAO']:
-            tipo_comunicacao = '1'
-        
-        # Converter tipo_comunicacao para int para verificação de histórico
-        try:
-            tipo_comunicacao_int = int(tipo_comunicacao) if str(tipo_comunicacao).isdigit() else 1
-        except (ValueError, TypeError):
-            tipo_comunicacao_int = 1
-        
-        # Verificar histórico de envios e ajustar Tipo_Comunicacao
-        if not historico_envios_df.empty:
-            tipo_comunicacao_ajustado = verificar_historico_cliente(
-                proposta_isize=record.codigo_externo,
-                cpf=record.cpf,
-                tipo_comunicacao_novo=tipo_comunicacao_int,
-                historico_df=historico_envios_df
-            )
+                "ponto_referencia": endereco_data['ponto_referencia'],
+            }
             
-            # Contabilizar alterações
-            if tipo_comunicacao_ajustado == 0:
-                historico_stats['bloqueados'] += 1
-            elif tipo_comunicacao_ajustado == 2 and tipo_comunicacao_int == 1:
-                historico_stats['alterados_para_2'] += 1
+            # Obter informações do template
+            template_info = TemplateMapper.get_template_for_record(record)
+            template_id = template_info.get('template_id')
+            
+            if not template_id:
+                pbar.update(1)
+                continue
+            
+            # Estatísticas
+            template_stats[template_id] = template_stats.get(template_id, 0) + 1
+            
+            # Obter configuração do template
+            template_config = TEMPLATES.get(template_id)
+            if not template_config:
+                pbar.update(1)
+                continue
+        
+            # Gerar variáveis com dados completos
+            variaveis_dict = TemplateMapper.generate_variables(template_id, record_data_completo)
+            
+            # Obter corpo da mensagem do banco
+            corpo_mensagem = obter_corpo_mensagem_template(db_manager, template_id)
+            
+            # Substituir variáveis na mensagem
+            mensagem_preview = substituir_variaveis_mensagem(corpo_mensagem, variaveis_dict)
+            
+            # Formatar variáveis para exibição
+            variaveis_str = TemplateMapper.format_variables_string(variaveis_dict)
+            
+            # Extrair primeiro e último nome
+            nome_completo = record.nome_cliente or ''
+            nome_cliente_formatado = extrair_primeiro_ultimo_nome(nome_completo)
+            
+            # Normalizar telefone (11 dígitos)
+            # Buscar telefone de múltiplas fontes
+            telefone_origem = record.telefone_contato or record.numero_acesso or ""
+            telefone_contato = normalizar_telefone(telefone_origem)
+            
+            # Normalizar CEP (8 dígitos)
+            cep_normalizado = normalizar_cep(record.cep or "")
+            
+            # Normalizar Data_Venda (DD/MM/AAAA) - usar Data Conectada
+            data_venda_formatada = normalizar_data_venda(record.data_venda)
+            
+            # Tipo_Comunicacao: usar Template_Triggers, substituir "EM CRIAÇÃO" por "1"
+            template_triggers = record.template or ''
+            tipo_comunicacao = template_triggers
+            if template_triggers.upper() in ['EM CRIAÇÃO', 'EM CRIACAO', 'EM_CRIACAO']:
+                tipo_comunicacao = '1'
+            
+            # Converter tipo_comunicacao para int para verificação de histórico
+            try:
+                tipo_comunicacao_int = int(tipo_comunicacao) if str(tipo_comunicacao).isdigit() else 1
+            except (ValueError, TypeError):
+                tipo_comunicacao_int = 1
+            
+            # Verificar histórico de envios e ajustar Tipo_Comunicacao
+            if not historico_envios_df.empty:
+                tipo_comunicacao_ajustado = verificar_historico_cliente(
+                    proposta_isize=record.codigo_externo,
+                    cpf=record.cpf,
+                    tipo_comunicacao_novo=tipo_comunicacao_int,
+                    historico_df=historico_envios_df
+                )
+                
+                # Contabilizar alterações
+                if tipo_comunicacao_ajustado == 0:
+                    historico_stats['bloqueados'] += 1
+                elif tipo_comunicacao_ajustado == 2 and tipo_comunicacao_int == 1:
+                    historico_stats['alterados_para_2'] += 1
+                else:
+                    historico_stats['mantidos'] += 1
+                
+                tipo_comunicacao = str(tipo_comunicacao_ajustado)
+            
+            # Extrair contagens e flags de reclassificação da query
+            total_classificacoes = row_dict.get('total_classificacoes', 1)
+            try:
+                total_classificacoes = int(total_classificacoes) if total_classificacoes else 1
+            except (ValueError, TypeError):
+                total_classificacoes = 1
+            
+            houve_reclassificacao = row_dict.get('houve_reclassificacao', 'NAO')
+            if not houve_reclassificacao or houve_reclassificacao == 'NAO':
+                houve_reclassificacao = 'NAO'
             else:
-                historico_stats['mantidos'] += 1
+                houve_reclassificacao = 'SIM'
             
-            tipo_comunicacao = str(tipo_comunicacao_ajustado)
-        
-        # Extrair contagens e flags de reclassificação da query
-        total_classificacoes = row_dict.get('total_classificacoes', 1)
-        try:
-            total_classificacoes = int(total_classificacoes) if total_classificacoes else 1
-        except (ValueError, TypeError):
-            total_classificacoes = 1
-        
-        houve_reclassificacao = row_dict.get('houve_reclassificacao', 'NAO')
-        if not houve_reclassificacao or houve_reclassificacao == 'NAO':
-            houve_reclassificacao = 'NAO'
-        else:
-            houve_reclassificacao = 'SIM'
-        
-        # Contagem de tentativas (baseado no histórico de envios)
-        tentativas = 0
-        if not historico_envios_df.empty and record.codigo_externo:
-            # Contar quantas vezes este cliente já recebeu mensagens
-            mask = (
-                (historico_envios_df.get('proposta_isize', pd.Series()).astype(str).str.strip() == str(record.codigo_externo).strip()) |
-                (historico_envios_df.get('cpf', pd.Series()).astype(str).str.strip() == str(record.cpf).strip())
+            # Contagem de tentativas (baseado no histórico de envios - apenas envios efetivos tipo 1 ou 2)
+            tentativas = 0
+            if not historico_envios_df.empty and record.codigo_externo:
+                # Buscar registros do cliente
+                mask = (
+                    (historico_envios_df.get('Proposta_iSize', pd.Series()).astype(str).str.strip() == str(record.codigo_externo).strip()) |
+                    (historico_envios_df.get('Cpf', pd.Series()).astype(str).str.strip() == str(record.cpf).strip())
+                )
+                registros_cliente = historico_envios_df[mask].copy()
+                
+                if not registros_cliente.empty:
+                    # Contar apenas envios efetivos (tipo 1 ou 2)
+                    if 'Tipo_Comunicacao' in registros_cliente.columns:
+                        tipos = pd.to_numeric(registros_cliente['Tipo_Comunicacao'], errors='coerce').fillna(0)
+                        tentativas = ((tipos == 1) | (tipos == 2)).sum()
+            
+            # Normalizar Data_Conectada
+            data_conectada_formatada = ''
+            if row_dict.get('data_conectada'):
+                try:
+                    data_conectada_raw = str(row_dict['data_conectada']).strip()
+                    if data_conectada_raw:
+                        # Tentar parsear diferentes formatos
+                        for fmt in ['%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%d/%m/%Y', '%d/%m/%Y %H:%M:%S']:
+                            try:
+                                dt = datetime.strptime(data_conectada_raw[:19] if len(data_conectada_raw) > 19 else data_conectada_raw, fmt)
+                                data_conectada_formatada = dt.strftime('%d/%m/%Y')
+                                break
+                            except ValueError:
+                                continue
+                        if not data_conectada_formatada:
+                            data_conectada_formatada = data_conectada_raw[:10]  # Usar primeiros 10 caracteres
+                except Exception:
+                    pass
+            
+            # Ordem das colunas principais (conforme especificado para Google Sheets)
+            row_data = {
+                'Proposta_iSize': record.codigo_externo or '',
+                'Cpf': record.cpf or '',
+                'NomeCliente': nome_cliente_formatado,
+                'Telefone_Contato': telefone_contato,
+                'Endereco': endereco_data['endereco'] or '',
+                'Numero': endereco_data['numero'] or '',
+                'Complemento': endereco_data['complemento'] or '',
+                'Bairro': endereco_data['bairro'] or '',
+                'Cidade': record.cidade or '',
+                'UF': record.uf or '',
+                'Cep': cep_normalizado,
+                'Ponto_Referencia': endereco_data['ponto_referencia'] or '',
+                'Cod_Rastreio': link_rastreio or '',
+                'Data_Venda': data_venda_formatada,
+                'Data_Conectada': data_conectada_formatada,
+                'Tipo_Comunicacao': tipo_comunicacao,
+                'Status_Disparo': 'FALSE',  # Sempre FALSE
+                'DataHora_Disparo': '',  # Sempre vazio
+            }
+            
+            # Colunas de homologação ao final (conforme solicitado)
+            row_data.update({
+                'Template_Triggers': template_triggers,
+                'O_Que_Aconteceu': record.o_que_aconteceu or '',
+                'Tentativas': tentativas,
+                'Total_Classificacoes': total_classificacoes,
+                'Houve_Reclassificacao': houve_reclassificacao,
+                'Acao_Realizar': record.acao_a_realizar or '',
+            })
+            
+            homologacao_data.append(row_data)
+            
+            # Atualizar barra de progresso
+            pbar.update(1)
+            pbar.set_postfix(
+                processados=row_idx,
+                total=total_registros,
+                homologacao=len(homologacao_data)
             )
-            tentativas = mask.sum() if hasattr(mask, 'sum') else 0
-        
-        # Ordem IMUTÁVEL das colunas principais (conforme especificado para Google Sheets)
-        row_data = {
-            'Proposta_iSize': record.codigo_externo or '',
-            'Cpf': record.cpf or '',
-            'NomeCliente': nome_cliente_formatado,
-            'Telefone_Contato': telefone_contato,
-            'Endereco': endereco_data['endereco'] or '',
-            'Numero': endereco_data['numero'] or '',
-            'Complemento': endereco_data['complemento'] or '',
-            'Bairro': endereco_data['bairro'] or '',
-            'Cidade': record.cidade or '',
-            'UF': record.uf or '',
-            'Cep': cep_normalizado,
-            'Ponto_Referencia': endereco_data['ponto_referencia'] or '',
-            'Cod_Rastreio': link_rastreio or '',
-            'Data_Venda': data_venda_formatada,
-            'Tipo_Comunicacao': tipo_comunicacao,
-            'Tentativas': tentativas,
-            'Total_Classificacoes': total_classificacoes,
-            'Houve_Reclassificacao': houve_reclassificacao,
-            'Status_Disparo': 'FALSE',  # Sempre FALSE
-            'DataHora_Disparo': '',  # Sempre vazio
-        }
-        
-        # Colunas apenas para homologação (não se aplica à produção) - adicionadas no final
-        row_data.update({
-            'Template_Triggers': template_triggers,
-            'O_Que_Aconteceu': record.o_que_aconteceu or '',
-            'Acao_Realizar': record.acao_a_realizar or '',
-        })
-        
-        homologacao_data.append(row_data)
     
-    # 4. Salvar arquivo de homologação
-    print("[4] Salvando arquivo de homologação...")
+    # 5. Salvar arquivo de homologação
+    print("\n[5] Salvando arquivo de homologação...")
     
     OUTPUT_HOMOLOGACAO.parent.mkdir(parents=True, exist_ok=True)
     
@@ -1665,20 +1873,21 @@ def gerar_arquivo_homologacao():
     
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         if homologacao_data:
-            # Ordem IMUTÁVEL das colunas principais (para Google Sheets)
-            # Removida coluna vazia após NomeCliente (conforme solicitado)
+            # Ordem das colunas principais (para Google Sheets)
             colunas_principais = [
                 'Proposta_iSize', 'Cpf', 'NomeCliente', 'Telefone_Contato',
                 'Endereco', 'Numero', 'Complemento', 'Bairro', 'Cidade', 'UF', 'Cep', 'Ponto_Referencia',
-                'Cod_Rastreio', 'Data_Venda', 'Tipo_Comunicacao', 
-                'Tentativas', 'Total_Classificacoes', 'Houve_Reclassificacao',
+                'Cod_Rastreio', 'Data_Venda', 'Data_Conectada', 'Tipo_Comunicacao',
                 'Status_Disparo', 'DataHora_Disparo'
             ]
             
-            # Colunas apenas para homologação (não se aplica à produção) - adicionadas no final
+            # Colunas de homologação ao final (conforme solicitado)
             colunas_homologacao = [
                 'Template_Triggers',
                 'O_Que_Aconteceu',
+                'Tentativas',
+                'Total_Classificacoes',
+                'Houve_Reclassificacao',
                 'Acao_Realizar'
             ]
             

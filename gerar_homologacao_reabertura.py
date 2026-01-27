@@ -14,6 +14,8 @@ import pandas as pd
 from src.database.db_manager import DatabaseManager
 from src.models.portabilidade import PortabilidadeStatus, StatusOrdem
 from src.utils.csv_generator import CSVGenerator
+from src.utils.validar_processamento import filtrar_registros_validos, obter_estatisticas_validacao
+from src.utils.progress_bar import ProgressBar
 
 # Configurar logging
 Path('logs').mkdir(exist_ok=True)
@@ -239,6 +241,43 @@ def main():
         print("\n⚠ Nenhum registro cancelado encontrado!")
         return
     
+    # [2.1] Validar registros usando tabela portabilidade_processamento
+    print("[2.1] Validando registros com tabela portabilidade_processamento...")
+    try:
+        # Converter rows para lista de dicionários
+        registros_para_validar = []
+        for row in rows:
+            row_dict = dict(zip(columns, row))
+            registros_para_validar.append(row_dict)
+        
+        # Filtrar registros válidos
+        registros_validos, registros_invalidos = filtrar_registros_validos(
+            db_manager, registros_para_validar
+        )
+        
+        # Estatísticas de validação
+        stats_validacao = obter_estatisticas_validacao(db_manager)
+        print(f"    >> {len(registros_validos)} registros válidos para processamento")
+        print(f"    >> {len(registros_invalidos)} registros inválidos (serão ignorados)")
+        if stats_validacao['total_registros'] > 0:
+            print(f"    >> Estatísticas da tabela portabilidade_processamento:")
+            print(f"       - Total: {stats_validacao['total_registros']}")
+            print(f"       - Válidos: {stats_validacao['validos']}")
+            print(f"       - Com conflito: {stats_validacao['com_conflito']}")
+            print(f"       - Com cancelamento: {stats_validacao['com_cancelamento']}")
+        
+        # Reconstruir rows apenas com registros válidos
+        rows_validos = []
+        for registro in registros_validos:
+            row_reconstruido = [registro.get(col, None) for col in columns]
+            rows_validos.append(row_reconstruido)
+        
+        rows = rows_validos
+        print(f"    >> Processando {len(rows)} registros válidos")
+    except Exception as e:
+        logger.warning(f"Erro ao validar registros (continuando sem validação): {e}")
+        print(f"    >> Aviso: Validação não pôde ser executada, processando todos os registros")
+    
     # [3] Converter para PortabilidadeRecord
     print("[3] Processando registros...")
     from src.models.portabilidade import PortabilidadeRecord
@@ -246,48 +285,53 @@ def main():
     reabertura = []
     results_map = {}  # Simular results_map vazio para homologação
     
-    for row in rows:
-        record_dict = dict(zip(columns, row))
-        
-        # Criar record
-        try:
-            # Normalizar CPF (remover formatação)
-            cpf = str(record_dict.get('cpf', '')).strip()
-            cpf = cpf.replace('.', '').replace('-', '').replace('/', '').replace(' ', '')
-            if len(cpf) != 11 or not cpf.isdigit():
-                cpf = ''
-            
-            # Processar data_portabilidade
-            data_portabilidade = None
-            if record_dict.get('data_portabilidade'):
-                try:
-                    data_portabilidade = datetime.fromisoformat(str(record_dict['data_portabilidade']))
-                except:
+    with ProgressBar(
+        total=len(rows),
+        desc="Processando reaberturas",
+        unit="registros"
+    ) as pbar:
+        for row in rows:
+            record_dict = dict(zip(columns, row))
+            try:
+                # Normalizar CPF (remover formatação)
+                cpf = str(record_dict.get('cpf', '')).strip()
+                cpf = cpf.replace('.', '').replace('-', '').replace('/', '').replace(' ', '')
+                if len(cpf) != 11 or not cpf.isdigit():
+                    cpf = ''
+                
+                # Processar data_portabilidade
+                data_portabilidade = None
+                if record_dict.get('data_portabilidade'):
                     try:
-                        # Tentar outros formatos
-                        data_str = str(record_dict['data_portabilidade']).strip()
-                        if len(data_str) >= 10:
-                            data_portabilidade = datetime.strptime(data_str[:10], '%Y-%m-%d')
-                    except:
-                        pass
-            
-            record = PortabilidadeRecord(
-                cpf=cpf,
-                numero_acesso=str(record_dict.get('numero_acesso', '')).strip(),
-                numero_ordem=str(record_dict.get('numero_ordem', '')).strip(),
-                codigo_externo=str(record_dict.get('codigo_externo', '')).strip(),
-                status_bilhete=PortabilidadeStatus(record_dict['status_bilhete']) if record_dict.get('status_bilhete') and str(record_dict['status_bilhete']).strip() else None,
-                status_ordem=StatusOrdem(record_dict['status_ordem']) if record_dict.get('status_ordem') and str(record_dict['status_ordem']).strip() else None,
-                operadora_doadora=str(record_dict.get('operadora_doadora', '')).strip() if record_dict.get('operadora_doadora') else None,
-                data_portabilidade=data_portabilidade,
-                motivo_cancelamento=str(record_dict.get('motivo_cancelamento', '')).strip() if record_dict.get('motivo_cancelamento') else None,
-                motivo_recusa=str(record_dict.get('motivo_recusa', '')).strip() if record_dict.get('motivo_recusa') else None,
-                preco_ordem=str(record_dict.get('preco_ordem', '')).strip() if record_dict.get('preco_ordem') else None
-            )
-            reabertura.append(record)
-        except Exception as e:
-            logger.error(f"Erro ao criar record: {e} - Dados: {record_dict}")
-            continue
+                        data_portabilidade = datetime.fromisoformat(str(record_dict['data_portabilidade']))
+                    except Exception:
+                        try:
+                            data_str = str(record_dict['data_portabilidade']).strip()
+                            if len(data_str) >= 10:
+                                data_portabilidade = datetime.strptime(data_str[:10], '%Y-%m-%d')
+                        except Exception:
+                            pass
+                
+                record = PortabilidadeRecord(
+                    cpf=cpf,
+                    numero_acesso=str(record_dict.get('numero_acesso', '')).strip(),
+                    numero_ordem=str(record_dict.get('numero_ordem', '')).strip(),
+                    codigo_externo=str(record_dict.get('codigo_externo', '')).strip(),
+                    status_bilhete=PortabilidadeStatus(record_dict['status_bilhete']) if record_dict.get('status_bilhete') and str(record_dict['status_bilhete']).strip() else None,
+                    status_ordem=StatusOrdem(record_dict['status_ordem']) if record_dict.get('status_ordem') and str(record_dict['status_ordem']).strip() else None,
+                    operadora_doadora=str(record_dict.get('operadora_doadora', '')).strip() if record_dict.get('operadora_doadora') else None,
+                    data_portabilidade=data_portabilidade,
+                    motivo_cancelamento=str(record_dict.get('motivo_cancelamento', '')).strip() if record_dict.get('motivo_cancelamento') else None,
+                    motivo_recusa=str(record_dict.get('motivo_recusa', '')).strip() if record_dict.get('motivo_recusa') else None,
+                    preco_ordem=str(record_dict.get('preco_ordem', '')).strip() if record_dict.get('preco_ordem') else None
+                )
+                reabertura.append(record)
+                pbar.update(1)
+                pbar.set_postfix(processados=len(reabertura))
+            except Exception as e:
+                logger.error(f"Erro ao criar record: {e} - Dados: {record_dict}")
+                pbar.update(1)
+                continue
     
     print(f"    >> {len(reabertura)} registros processados")
     

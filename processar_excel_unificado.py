@@ -41,6 +41,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from src.database import DatabaseManager
+from src.utils.progress_bar import ProgressBar
 
 # Caminhos de configuração (usar config centralizado)
 try:
@@ -1010,76 +1011,90 @@ def processar_excel_unificado(
             logger.error("=" * 70)
             return stats
         
-        # Processar cada linha
+        # Processar cada linha com barra de progresso
+        print(f"\n[3] Processando {stats['total_linhas']} registros...")
         with db_manager._get_connection() as conn:
             cursor = conn.cursor()
             
-            for idx, row in df.iterrows():
-                try:
-                    # Mapear campos
-                    dados = mapear_campos_excel(row)
+            with ProgressBar(
+                total=stats['total_linhas'],
+                desc="Processando Excel",
+                unit="linhas"
+            ) as pbar:
+                for idx, row in df.iterrows():
+                    try:
+                        # Mapear campos
+                        dados = mapear_campos_excel(row)
+                        
+                        if not dados:
+                            stats['ignorados'] += 1
+                            continue
                     
-                    if not dados:
-                        stats['ignorados'] += 1
+                        # Verificar se registro já existe
+                        cursor.execute("""
+                            SELECT id FROM base_coverte_prop
+                            WHERE (cpf = ? OR cpf IS NULL)
+                            AND numero_ordem = ?
+                            AND (codigo_externo = ? OR codigo_externo IS NULL)
+                        """, (
+                            dados.get('cpf'),
+                            dados.get('numero_ordem'),
+                            dados.get('codigo_externo')
+                        ))
+                        
+                        existing = cursor.fetchone()
+                        
+                        if existing:
+                            # Atualizar registro existente
+                            campos_update = []
+                            valores_update = []
+                            
+                            for campo, valor in dados.items():
+                                if campo not in ['cpf', 'numero_ordem', 'codigo_externo']:
+                                    campos_update.append(f"{campo} = ?")
+                                    valores_update.append(valor)
+                            
+                            valores_update.append(existing[0])
+                            
+                            cursor.execute(f"""
+                                UPDATE base_coverte_prop SET
+                                    {', '.join(campos_update)},
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = ?
+                            """, valores_update)
+                            
+                            stats['atualizados'] += 1
+                        else:
+                            # Inserir novo registro
+                            campos = list(dados.keys()) + ['origem_arquivo']
+                            valores = list(dados.values()) + [arquivo_excel.name]
+                            placeholders = ', '.join(['?'] * len(campos))
+                            
+                            cursor.execute(f"""
+                                INSERT INTO base_coverte_prop ({', '.join(campos)})
+                                VALUES ({placeholders})
+                            """, valores)
+                            
+                            stats['inseridos'] += 1
+                        
+                        stats['processados'] += 1
+                        
+                        # Atualizar barra de progresso
+                        pbar.update(1)
+                        pbar.set_postfix(
+                            inseridos=stats['inseridos'],
+                            atualizados=stats['atualizados'],
+                            erros=stats['erros']
+                        )
+                        
+                        if (idx + 1) % 100 == 0:
+                            conn.commit()
+                    
+                    except Exception as e:
+                        logger.error(f"Erro ao processar linha {idx + 1}: {e}")
+                        stats['erros'] += 1
+                        pbar.update(1)
                         continue
-                    
-                    # Verificar se registro já existe
-                    cursor.execute("""
-                        SELECT id FROM base_coverte_prop
-                        WHERE (cpf = ? OR cpf IS NULL)
-                        AND numero_ordem = ?
-                        AND (codigo_externo = ? OR codigo_externo IS NULL)
-                    """, (
-                        dados.get('cpf'),
-                        dados.get('numero_ordem'),
-                        dados.get('codigo_externo')
-                    ))
-                    
-                    existing = cursor.fetchone()
-                    
-                    if existing:
-                        # Atualizar registro existente
-                        campos_update = []
-                        valores_update = []
-                        
-                        for campo, valor in dados.items():
-                            if campo not in ['cpf', 'numero_ordem', 'codigo_externo']:
-                                campos_update.append(f"{campo} = ?")
-                                valores_update.append(valor)
-                        
-                        valores_update.append(existing[0])
-                        
-                        cursor.execute(f"""
-                            UPDATE base_coverte_prop SET
-                                {', '.join(campos_update)},
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        """, valores_update)
-                        
-                        stats['atualizados'] += 1
-                    else:
-                        # Inserir novo registro
-                        campos = list(dados.keys()) + ['origem_arquivo']
-                        valores = list(dados.values()) + [arquivo_excel.name]
-                        placeholders = ', '.join(['?'] * len(campos))
-                        
-                        cursor.execute(f"""
-                            INSERT INTO base_coverte_prop ({', '.join(campos)})
-                            VALUES ({placeholders})
-                        """, valores)
-                        
-                        stats['inseridos'] += 1
-                    
-                    stats['processados'] += 1
-                    
-                    if (idx + 1) % 100 == 0:
-                        conn.commit()
-                        logger.info(f"  Progresso: {idx + 1}/{stats['total_linhas']} linhas processadas...")
-                    
-                except Exception as e:
-                    logger.error(f"Erro ao processar linha {idx + 1}: {e}")
-                    stats['erros'] += 1
-                    continue
             
             conn.commit()
         

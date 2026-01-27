@@ -46,6 +46,9 @@ PASTA_LOGS = PROJECT_ROOT / "logs"
 
 # ========== ARQUIVOS DE SAÍDA ==========
 
+# Pasta de saída para arquivos de homologação (retornos do gerenciador)
+PASTA_SAIDA_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador")
+
 # Arquivos de homologação (usando caminho absoluto)
 OUTPUT_WPP = DATA_DIR / "homologacao_wpp.csv"
 OUTPUT_APROVISIONAMENTOS = DATA_DIR / "homologacao_aprovisionamentos.csv"

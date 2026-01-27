@@ -325,6 +325,110 @@ class DatabaseManager:
                 ON dados_fallback_cache(numero_ordem, is_valido)
             """)
             
+            # Tabela de processamento de portabilidade (nova estrutura com campos de controle)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS portabilidade_processamento (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    
+                    -- Campos obrigatórios de identificação
+                    id_proposta_isize TEXT NOT NULL,
+                    data_importacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    -- Campos de controle
+                    STATUS TEXT,
+                    MOTIVO_CONFLITO TEXT,
+                    MOTIVO_CANCELAMENTO TEXT,
+                    
+                    -- Todos os campos existentes da tabela base_coverte_prop
+                    DATA_SOLICITACAO TEXT,
+                    MES_SOLICITACAO TEXT,
+                    DATA_ATIVACAO TEXT,
+                    MES_ATIVACAO TEXT,
+                    DATA_CONCLUSAO TEXT,
+                    SKY_CONTRATO TEXT,
+                    SKY_CLIENTE TEXT,
+                    PROTOCOLO TEXT,
+                    ACESSO TEXT,
+                    ACESSO_TEMPORARIO TEXT,
+                    DDD TEXT,
+                    OPERADORA_N1 TEXT,
+                    TIPO_PRE_POS_CONTROLE TEXT,
+                    TECNOLOGIA TEXT,
+                    VOZ_DADOS TEXT,
+                    DOADORA TEXT,
+                    RECEPTORA TEXT,
+                    TIPO TEXT,
+                    TIPO_SEGMENTO_1 TEXT,
+                    TIPO_SEGMENTO_2 TEXT,
+                    TIPO_FAMILIA_PLANO TEXT,
+                    NIVEL_PLANO TEXT,
+                    CANAL_N0 TEXT,
+                    CANAL_N1 TEXT,
+                    CANAL_N2 TEXT,
+                    CANAL_N3 TEXT,
+                    CANAL_N4 TEXT,
+                    GRUPO_ECONOMICO TEXT,
+                    CUSTCODE TEXT,
+                    CPF_CNPJ TEXT,
+                    PORTABILIDADE TEXT,
+                    SELF_PORTIN TEXT,
+                    CANAL_PORTABILIDADE TEXT,
+                    TENTATIVAS TEXT,
+                    ID_ISIZE TEXT,
+                    DATA_UPDATE TEXT,
+                    
+                    -- Campos adicionais de base_coverte_prop (se necessário)
+                    cpf TEXT,
+                    codigo_externo TEXT,
+                    numero_ordem TEXT,
+                    numero_acesso TEXT,
+                    cliente_nome TEXT,
+                    endereco TEXT,
+                    numero TEXT,
+                    complemento TEXT,
+                    bairro TEXT,
+                    cidade TEXT,
+                    uf TEXT,
+                    cep TEXT,
+                    telefone_portado TEXT,
+                    plano TEXT,
+                    produto_vendido TEXT,
+                    data_venda TEXT,
+                    
+                    -- Metadados
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    UNIQUE(id_proposta_isize, data_importacao)
+                )
+            """)
+            
+            # Criar índices para a nova tabela
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_processamento_id_proposta 
+                ON portabilidade_processamento(id_proposta_isize)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_processamento_status 
+                ON portabilidade_processamento(STATUS)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_processamento_data_importacao 
+                ON portabilidade_processamento(data_importacao)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_processamento_cpf 
+                ON portabilidade_processamento(cpf)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_processamento_codigo_externo 
+                ON portabilidade_processamento(codigo_externo)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_processamento_id_isize 
+                ON portabilidade_processamento(ID_ISIZE)
+            """)
+            
             conn.commit()
             logger.info("Banco de dados inicializado com sucesso")
     
@@ -1740,16 +1844,25 @@ class DatabaseManager:
         stats = {'processados': 0, 'inseridos': 0, 'novas_versoes': 0, 'sem_mudancas': 0, 'erros': 0}
         
         # Migrar estrutura do banco para incluir todas as colunas do Excel
+        # Nota: A migração dinâmica de colunas é feita automaticamente durante a sincronização
+        # Não é necessário um módulo separado de migração
         try:
             if objects_loader.file_path:
-                from src.database.migrate_relatorio_objetos_completo import migrar_tabela_relatorio_objetos
-                logger.info("Migrando estrutura do banco para incluir todas as colunas CSI...")
-                migrar_tabela_relatorio_objetos(self.db_path, objects_loader.file_path)
-                logger.info("✅ Migração concluída")
+                # Tentar importar módulo de migração se existir (opcional)
+                try:
+                    from src.database.migrate_relatorio_objetos_completo import migrar_tabela_relatorio_objetos
+                    logger.info("Migrando estrutura do banco para incluir todas as colunas CSI...")
+                    migrar_tabela_relatorio_objetos(self.db_path, objects_loader.file_path)
+                    logger.info("✅ Migração concluída")
+                except ImportError:
+                    # Módulo de migração não existe - isso é normal, a migração dinâmica será feita durante sync
+                    logger.debug("Módulo de migração não encontrado - usando migração dinâmica durante sincronização")
+                except Exception as e:
+                    logger.warning(f"⚠️ Erro durante migração (continuando): {e}")
+                    logger.debug(f"Detalhes: {e}", exc_info=True)
         except Exception as e:
-            logger.warning(f"⚠️ Erro durante migração (continuando): {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
+            logger.warning(f"⚠️ Erro durante verificação de migração (continuando): {e}")
+            logger.debug(f"Detalhes: {e}", exc_info=True)
         
         with self._get_connection() as conn:
             cursor = conn.cursor()
