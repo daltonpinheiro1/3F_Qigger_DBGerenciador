@@ -80,14 +80,24 @@ def main():
             print("    >> Tabela base_coverte_prop não encontrada, usando apenas portabilidade_records")
         
         # Query sincronizada usando todas as tabelas disponíveis
-        # USANDO APENAS O REGISTRO MAIS RECENTE POR codigo_externo (evitar duplicatas)
+        # USANDO O REGISTRO MAIS RECENTE POR codigo_externo (independente do status)
+        # Filtro de status aplicado DEPOIS de pegar o registro mais recente
         if tem_base_coverte:
             query = """
             WITH registros_mais_recentes AS (
-                -- Subquery para pegar apenas o registro mais recente por codigo_externo
+                -- Subquery para pegar o registro MAIS RECENTE por codigo_externo (SEM filtro de status)
+                -- Isso garante que pegamos o status ATUAL, não um status antigo
                 SELECT 
                     codigo_externo,
-                    MAX(id) as max_id,
+                    MAX(id) as max_id
+                FROM portabilidade_records
+                WHERE codigo_externo IS NOT NULL AND codigo_externo != ''
+                GROUP BY codigo_externo
+            ),
+            -- CTE separada para contar classificações relevantes (com o status filtrado)
+            contagem_classificacoes AS (
+                SELECT 
+                    codigo_externo,
                     COUNT(*) as total_classificacoes
                 FROM portabilidade_records
                 WHERE (status_ordem = 'Em Aprovisionamento' OR status_bilhete = 'Em Aprovisionamento')
@@ -182,14 +192,15 @@ def main():
                 ro.data_entrega AS ro_data_entrega,
                 ro.iccid AS ro_iccid,
                 
-                -- Contadores de classificação
-                rmr.total_classificacoes,
-                CASE WHEN rmr.total_classificacoes > 1 THEN 'SIM' ELSE 'NAO' END AS houve_reclassificacao
+                -- Contadores de classificação (do status filtrado, não de todos os registros)
+                COALESCE(cc.total_classificacoes, 0) as total_classificacoes,
+                CASE WHEN COALESCE(cc.total_classificacoes, 0) > 1 THEN 'SIM' ELSE 'NAO' END AS houve_reclassificacao
                 
             FROM portabilidade_records pr
             INNER JOIN registros_mais_recentes rmr ON (
                 pr.codigo_externo = rmr.codigo_externo AND pr.id = rmr.max_id
             )
+            LEFT JOIN contagem_classificacoes cc ON pr.codigo_externo = cc.codigo_externo
             LEFT JOIN ultimo_status_bilhete usb ON pr.codigo_externo = usb.codigo_externo
             LEFT JOIN base_coverte_prop bc ON (
                 TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) = 
@@ -200,11 +211,15 @@ def main():
                 TRIM(COALESCE(CAST(ro.codigo_externo AS TEXT), ''))
             )
             WHERE 
-                -- Filtro: APENAS "Em Aprovisionamento" (NÃO incluir "Erro no Aprovisionamento")
+                -- Filtro: O status MAIS RECENTE deve ser "Em Aprovisionamento"
+                -- Se o registro foi atualizado para outro status (ex: Concluído), NÃO aparece aqui
+                -- Também exclui "Erro no Aprovisionamento"
                 (
                     pr.status_ordem = 'Em Aprovisionamento' 
                     OR pr.status_bilhete = 'Em Aprovisionamento'
                 )
+                AND pr.status_ordem != 'Erro no Aprovisionamento'
+                AND (pr.status_bilhete IS NULL OR pr.status_bilhete != 'Erro no Aprovisionamento')
             ORDER BY 
                 CASE 
                     WHEN bc.data_venda IS NOT NULL 
@@ -271,6 +286,23 @@ def main():
     if not rows:
         print("\n⚠ Nenhum registro em aprovisionamento encontrado!")
         return
+    
+    # [2.0.1] DEDUPLICAÇÃO: Remover duplicatas por codigo_externo (manter o primeiro)
+    print("[2.0.1] Removendo duplicatas por codigo_externo...")
+    registros_unicos = {}
+    duplicatas_removidas = 0
+    for row in rows:
+        row_dict = dict(zip(columns, row))
+        codigo_externo = str(row_dict.get('codigo_externo', '')).strip()
+        if codigo_externo and codigo_externo not in registros_unicos:
+            registros_unicos[codigo_externo] = row
+        elif codigo_externo:
+            duplicatas_removidas += 1
+    
+    rows = list(registros_unicos.values())
+    if duplicatas_removidas > 0:
+        print(f"    >> {duplicatas_removidas} duplicatas removidas")
+    print(f"    >> {len(rows)} registros únicos para processamento")
     
     # [2.1] Validar registros usando tabela portabilidade_processamento
     print("[2.1] Validando registros com tabela portabilidade_processamento...")

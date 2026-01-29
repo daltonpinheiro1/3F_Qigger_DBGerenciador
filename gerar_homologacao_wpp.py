@@ -1135,6 +1135,23 @@ def gerar_arquivo_homologacao():
         print("Nenhum registro com template encontrado!")
         return
     
+    # [1.1] DEDUPLICAÇÃO: Remover duplicatas por codigo_externo (manter o primeiro)
+    print("[1.1] Removendo duplicatas por codigo_externo...")
+    registros_unicos = {}
+    duplicatas_removidas = 0
+    for row in rows:
+        row_dict = dict(zip(columns, row))
+        codigo_externo = str(row_dict.get('codigo_externo', '')).strip()
+        if codigo_externo and codigo_externo not in registros_unicos:
+            registros_unicos[codigo_externo] = row
+        elif codigo_externo:
+            duplicatas_removidas += 1
+    
+    rows = list(registros_unicos.values())
+    if duplicatas_removidas > 0:
+        print(f"    >> {duplicatas_removidas} duplicatas removidas")
+    print(f"    >> {len(rows)} registros únicos para processamento")
+    
     # 2.0 Carregar histórico de envios do Google Sheets
     print("[2.0] Carregando histórico de envios do Google Sheets...")
     historico_envios_df = carregar_historico_envios_gsheet()
