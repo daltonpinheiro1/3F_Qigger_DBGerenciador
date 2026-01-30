@@ -670,6 +670,26 @@ Exemplos:
             for arquivo in homologacao_stats['arquivos_copiados']:
                 print(f"    - {arquivo.name}")
     
+    # [5] Backup e replicação para rede
+    print("\n" + "=" * 70)
+    print("ETAPA 5: BACKUP E REPLICAÇÃO PARA REDE")
+    print("=" * 70)
+    
+    try:
+        from backup_database import replicar_para_rede, DB_PATH_LOCAL, BACKUP_REDE_PATH
+        
+        print("\n[5.1] Replicando banco de dados para rede...")
+        if replicar_para_rede(DB_PATH_LOCAL):
+            print(f"    ✅ Banco replicado para: {BACKUP_REDE_PATH}")
+        else:
+            print("    ⚠️ Não foi possível replicar para rede (volume pode não estar montado)")
+    except ImportError as e:
+        logger.warning(f"Módulo de backup não encontrado: {e}")
+        print("    ⚠️ Módulo de backup não disponível")
+    except Exception as e:
+        logger.warning(f"Erro ao replicar para rede: {e}")
+        print(f"    ⚠️ Erro na replicação: {e}")
+    
     print("\n" + "=" * 70)
     print("PROCESSAMENTO CONCLUÍDO!")
     print("=" * 70)
