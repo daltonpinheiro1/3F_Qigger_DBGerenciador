@@ -29,14 +29,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# CONFIGURAÇÃO DE BACKUP NA REDE
+# CONFIGURAÇÃO DE BACKUP NA REDE (SMB)
 # =============================================================================
-# Caminho do banco de dados local
-DB_PATH_LOCAL = "/Applications/Documentos/Projetos_python/3F_Qigger_DBGerenciador/data/portabilidade.db"
-
-# Caminho de destino na rede (Backoffice)
-BACKUP_REDE_DIR = "/Volumes/07 Backoffice/RETORNOS RPA - QIGGER/db.Portabilidade"
-BACKUP_REDE_PATH = f"{BACKUP_REDE_DIR}/portabilidade.db"
+# Destino: smb://files/07 Backoffice/RETORNOS RPA - QIGGER/db.Portabilidade/portabilidade.db
+try:
+    from config import DB_PATH, SMB_URL_07_BACKOFFICE, BACKUP_REDE_DIR, BACKUP_REDE_PATH
+    DB_PATH_LOCAL = DB_PATH if isinstance(DB_PATH, str) else str(DB_PATH)
+    SMB_URL_BACKOFFICE = SMB_URL_07_BACKOFFICE
+    BACKUP_REDE_DIR = Path(BACKUP_REDE_DIR) if not isinstance(BACKUP_REDE_DIR, Path) else BACKUP_REDE_DIR
+    BACKUP_REDE_PATH = BACKUP_REDE_PATH if isinstance(BACKUP_REDE_PATH, str) else str(BACKUP_REDE_DIR / "portabilidade.db")
+except ImportError:
+    DB_PATH_LOCAL = "/Applications/Documentos/Projetos_python/3F_Qigger_DBGerenciador/data/portabilidade.db"
+    SMB_URL_BACKOFFICE = "smb://files/07 Backoffice"
+    BACKUP_REDE_DIR = Path("/Volumes/07 Backoffice/RETORNOS RPA - QIGGER/db.Portabilidade")
+    BACKUP_REDE_PATH = str(BACKUP_REDE_DIR / "portabilidade.db")
 
 
 def backup_sqlite_seguro(src_path: str, dst_path: str) -> bool:
@@ -100,10 +106,11 @@ def replicar_para_rede(db_path: str = None) -> bool:
         logger.error(f"Banco de dados não encontrado: {src}")
         return False
     
-    # Verificar se a pasta de rede está acessível
+    # Verificar se a pasta de rede (SMB) está acessível
     if not dst_dir.parent.exists():
         logger.warning(f"Pasta de rede não acessível: {dst_dir.parent}")
-        logger.info("Verifique se o volume está montado: /Volumes/07 Backoffice")
+        logger.info(f"Monte o compartilhamento SMB: {SMB_URL_BACKOFFICE}")
+        logger.info("  Finder > Cmd+K > Cole a URL acima > Conectar")
         return False
     
     # Criar diretório de destino se não existir
@@ -113,9 +120,10 @@ def replicar_para_rede(db_path: str = None) -> bool:
         logger.error(f"Sem permissão para criar diretório: {dst_dir}")
         return False
     
-    logger.info(f"Replicando banco para rede...")
+    logger.info("Replicando banco para rede (SMB Backoffice)...")
     logger.info(f"  Origem: {src}")
     logger.info(f"  Destino: {dst}")
+    logger.info(f"  (SMB: {SMB_URL_BACKOFFICE}/RETORNOS RPA - QIGGER/db.Portabilidade/portabilidade.db)")
     
     # Estratégia: criar backup local temporário, depois copiar para rede
     # (sqlite3 .backup não funciona bem com caminhos de rede diretamente)

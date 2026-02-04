@@ -7,6 +7,7 @@ Processa todas as bases e gera todos os arquivos de homologação em sequência.
 
 ETAPAS:
 1. Processa Excel COVERTE BASE PROP.xlsx → base_coverte_prop
+1b. Processa Excel 3F_GROSS_Pre_Fechamento.xlsx (IMPORTACOES_QIGGER) → base_coverte_prop
 2. Processa arquivos CSV de atualização → portabilidade_records
 3. Processa Relatorio_Objetos.xlsx → relatorio_objetos
 4. Gera arquivos de homologação:
@@ -229,6 +230,93 @@ def processar_excel_coverte_prop(usar_smb: bool = True) -> dict:
     return stats
 
 
+# Nome do arquivo Excel GROSS (Pre Fechamento) na pasta de importações
+ARQUIVO_GROSS_NOME = "3F_GROSS_Pre_Fechamento.xlsx"
+
+
+def processar_excel_gross() -> dict:
+    """
+    Processa o arquivo 3F_GROSS_Pre_Fechamento.xlsx da pasta IMPORTACOES_QIGGER
+    e insere na tabela base_coverte_prop do portabilidade.db
+    """
+    logger.info("=" * 70)
+    logger.info("ETAPA 1b: PROCESSANDO EXCEL 3F_GROSS_Pre_Fechamento.xlsx")
+    logger.info("=" * 70)
+    
+    stats = {
+        'sucesso': False,
+        'arquivo': None,
+        'stats': {}
+    }
+    
+    try:
+        # Procurar arquivo na pasta de importações
+        arquivo_gross = None
+        
+        if pasta_importacoes.exists():
+            # Nome exato
+            candidato = pasta_importacoes / ARQUIVO_GROSS_NOME
+            if candidato.exists():
+                arquivo_gross = candidato
+            # Também aceitar variações (ex: 3F_GROSS_03_02.xlsx) — usar o mais recente
+            if not arquivo_gross:
+                candidatos = list(pasta_importacoes.glob("3F_GROSS*.xlsx"))
+                if candidatos:
+                    arquivo_gross = max(candidatos, key=lambda p: p.stat().st_mtime)
+            if not arquivo_gross:
+                candidatos = list(pasta_importacoes.glob("*GROSS*Pre*Fechamento*.xlsx"))
+                if candidatos:
+                    arquivo_gross = max(candidatos, key=lambda p: p.stat().st_mtime)
+        
+        if not arquivo_gross:
+            logger.info(f"⚠️ Arquivo {ARQUIVO_GROSS_NOME} não encontrado em {pasta_importacoes}")
+            logger.info("")
+            return stats
+        
+        logger.info(f"✓ Arquivo encontrado: {arquivo_gross.name}")
+        
+        try:
+            from processar_excel_unificado import processar_excel_unificado
+            
+            logger.info(f"Processando: {arquivo_gross}")
+            stats_processamento = processar_excel_unificado(arquivo_gross, db_path)
+            
+            stats['sucesso'] = True
+            stats['arquivo'] = str(arquivo_gross)
+            stats['stats'] = stats_processamento
+            logger.info(f"✅ Excel GROSS processado: {stats_processamento.get('processados', 0)} registros na base_coverte_prop (portabilidade.db)")
+                
+        except ImportError as e:
+            logger.error(f"❌ Erro ao importar processar_excel_unificado: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar Excel GROSS: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        finally:
+            # Sempre mover arquivo para processados ao final do processo (sucesso ou erro)
+            if arquivo_gross and arquivo_gross.exists():
+                try:
+                    pasta_processados = pasta_importacoes / "processados"
+                    pasta_processados.mkdir(parents=True, exist_ok=True)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    novo_nome = f"{arquivo_gross.stem}_{timestamp}{arquivo_gross.suffix}"
+                    destino = pasta_processados / novo_nome
+                    shutil.move(str(arquivo_gross), str(destino))
+                    logger.info(f"✅ Arquivo movido para processados: {destino.name}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Não foi possível mover arquivo para processados: {e}")
+            
+    except Exception as e:
+        logger.error(f"❌ Erro na etapa Excel GROSS: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    
+    logger.info("")
+    return stats
+
+
 def processar_csv_atualizacoes() -> dict:
     """Processa arquivos CSV de atualização"""
     logger.info("=" * 70)
@@ -354,20 +442,19 @@ def processar_relatorio_objetos() -> dict:
                 
                 logger.info(f"✅ Sincronizado: {sync_stats.get('inseridos', 0)} novos, "
                           f"{sync_stats.get('novas_versoes', 0)} novas versões")
-            
-            # Mover arquivo para processados após sucesso
-            try:
-                pasta_processados = pasta_importacoes / "processados"
-                pasta_processados.mkdir(parents=True, exist_ok=True)
-                
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                novo_nome = f"{arquivo_objetos.stem}_{timestamp}{arquivo_objetos.suffix}"
-                destino = pasta_processados / novo_nome
-                
-                shutil.move(str(arquivo_objetos), str(destino))
-                logger.info(f"✅ Arquivo movido para processados: {destino.name}")
-            except Exception as e:
-                logger.warning(f"⚠️ Não foi possível mover arquivo para processados: {e}")
+            finally:
+                # Sempre mover arquivo para processados ao final do processo (sucesso ou erro)
+                if arquivo_objetos and arquivo_objetos.exists():
+                    try:
+                        pasta_processados = pasta_importacoes / "processados"
+                        pasta_processados.mkdir(parents=True, exist_ok=True)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        novo_nome = f"{arquivo_objetos.stem}_{timestamp}{arquivo_objetos.suffix}"
+                        destino = pasta_processados / novo_nome
+                        shutil.move(str(arquivo_objetos), str(destino))
+                        logger.info(f"✅ Arquivo movido para processados: {destino.name}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Não foi possível mover arquivo para processados: {e}")
         else:
             logger.warning("⚠️ Nenhum arquivo Relatorio_Objetos.xlsx encontrado")
             
@@ -553,6 +640,7 @@ Exemplos:
     # Estatísticas gerais
     stats_geral = {
         'excel': {},
+        'excel_gross': {},
         'csv': {},
         'objetos': {},
         'homologacao': {}
@@ -599,6 +687,9 @@ Exemplos:
             logger.info("⏭️ Pulando processamento do Excel (--skip-excel)")
             logger.info("")
         
+        # 1b. Excel 3F_GROSS_Pre_Fechamento (pasta IMPORTACOES_QIGGER → base_coverte_prop)
+        stats_geral['excel_gross'] = processar_excel_gross()
+        
         # 2. CSV de atualização
         if not args.skip_csv:
             stats_geral['csv'] = processar_csv_atualizacoes()
@@ -612,7 +703,7 @@ Exemplos:
         else:
             logger.info("⏭️ Pulando processamento de Relatorio_Objetos (--skip-objetos)")
             logger.info("")
-    
+        
     # Gerar arquivos de homologação (se não for apenas bases)
     if not args.apenas_bases:
         stats_geral['homologacao'] = gerar_arquivos_homologacao()
@@ -631,6 +722,12 @@ Exemplos:
                 print(f"  ✅ Excel COVERTE BASE PROP: {excel_stats.get('stats', {}).get('processados', 0)} registros")
             else:
                 print(f"  ⚠️ Excel COVERTE BASE PROP: Não processado")
+        
+        excel_gross_stats = stats_geral.get('excel_gross', {})
+        if excel_gross_stats.get('sucesso'):
+            print(f"  ✅ Excel 3F_GROSS_Pre_Fechamento: {excel_gross_stats.get('stats', {}).get('processados', 0)} registros (base_coverte_prop)")
+        elif excel_gross_stats:
+            print(f"  ⚠️ Excel 3F_GROSS_Pre_Fechamento: Não encontrado em {pasta_importacoes}")
         
         if not args.skip_csv:
             csv_stats = stats_geral['csv']
@@ -676,13 +773,15 @@ Exemplos:
     print("=" * 70)
     
     try:
-        from backup_database import replicar_para_rede, DB_PATH_LOCAL, BACKUP_REDE_PATH
+        from backup_database import replicar_para_rede, DB_PATH_LOCAL, BACKUP_REDE_PATH, SMB_URL_BACKOFFICE
         
-        print("\n[5.1] Replicando banco de dados para rede...")
+        print("\n[5.1] Replicando banco de dados para rede SMB (07 Backoffice)...")
+        print(f"    Destino: smb://files/07 Backoffice/RETORNOS RPA - QIGGER/db.Portabilidade/portabilidade.db")
         if replicar_para_rede(DB_PATH_LOCAL):
             print(f"    ✅ Banco replicado para: {BACKUP_REDE_PATH}")
         else:
             print("    ⚠️ Não foi possível replicar para rede (volume pode não estar montado)")
+            print(f"    💡 Monte o SMB: Finder > Cmd+K > {SMB_URL_BACKOFFICE}")
     except ImportError as e:
         logger.warning(f"Módulo de backup não encontrado: {e}")
         print("    ⚠️ Módulo de backup não disponível")

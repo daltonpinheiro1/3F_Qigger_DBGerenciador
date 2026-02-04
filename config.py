@@ -49,6 +49,13 @@ PASTA_LOGS = PROJECT_ROOT / "logs"
 # Pasta de saída para arquivos de homologação (retornos do gerenciador)
 PASTA_SAIDA_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador")
 
+# Backup do banco na rede (SMB 07 Backoffice)
+# URL para montar: smb://files/07 Backoffice
+# Caminho local quando montado no macOS:
+SMB_URL_07_BACKOFFICE = "smb://files/07 Backoffice"
+BACKUP_REDE_DIR = Path("/Volumes/07 Backoffice/RETORNOS RPA - QIGGER/db.Portabilidade")
+BACKUP_REDE_PATH = str(BACKUP_REDE_DIR / "portabilidade.db")
+
 # Arquivos de homologação (usando caminho absoluto)
 OUTPUT_WPP = DATA_DIR / "homologacao_wpp.csv"
 OUTPUT_APROVISIONAMENTOS = DATA_DIR / "homologacao_aprovisionamentos.csv"
