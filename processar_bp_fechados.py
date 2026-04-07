@@ -646,7 +646,9 @@ def processar_bp_fechados(
             with ProgressBar(
                 total=stats['total_linhas'],
                 desc="Processando BP_FECHADOS",
-                unit="linhas"
+                unit="linhas",
+                logger=logger,
+                log_interval_pct=10.0
             ) as pbar:
                 for idx, row in df.iterrows():
                     try:

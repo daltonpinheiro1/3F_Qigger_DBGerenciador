@@ -9,6 +9,57 @@ from src.database.db_manager import DatabaseManager
 logger = logging.getLogger(__name__)
 
 
+def _carregar_indice_processamento(db_manager: DatabaseManager) -> Dict[str, Dict[str, Any]]:
+    """
+    Carrega toda a tabela portabilidade_processamento em memória, indexada por
+    id_proposta_isize, codigo_externo e cpf. Mantém o registro mais recente por data_importacao.
+    Uma única query em vez de N queries.
+    """
+    indice = {}
+    with db_manager._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='portabilidade_processamento'
+        """)
+        if not cursor.fetchone():
+            return indice
+
+        cursor.execute("""
+            SELECT id_proposta_isize, codigo_externo, cpf, CPF_CNPJ,
+                   STATUS, MOTIVO_CONFLITO, MOTIVO_CANCELAMENTO, data_importacao
+            FROM portabilidade_processamento
+            ORDER BY data_importacao DESC
+        """)
+        colunas = [d[0] for d in cursor.description]
+        for row in cursor.fetchall():
+            d = dict(zip(colunas, row))
+            id_prop = str(d.get('id_proposta_isize') or '').strip()
+            cod_ext = str(d.get('codigo_externo') or '').strip()
+            cpf_val = str(d.get('cpf') or d.get('CPF_CNPJ') or '').strip()
+            for chave in [id_prop, cod_ext, cpf_val]:
+                if chave and chave not in indice:
+                    indice[chave] = d
+    return indice
+
+
+def _validar_registro_em_memoria(dados: Dict[str, Any], id_registro: str) -> Tuple[bool, List[str]]:
+    """Valida um registro de processamento já carregado em memória."""
+    erros = []
+    status = (dados.get('STATUS') or '').strip().upper()
+    if not status:
+        erros.append('STATUS não informado na tabela portabilidade_processamento')
+    elif status in ['CANCELADO', 'CANCELAMENTO', 'BLOQUEADO', 'ERRO']:
+        erros.append(f'STATUS indica problema: {status}')
+    motivo_conflito = (dados.get('MOTIVO_CONFLITO') or '').strip()
+    if motivo_conflito:
+        erros.append(f'Conflito identificado: {motivo_conflito}')
+    motivo_cancelamento = (dados.get('MOTIVO_CANCELAMENTO') or '').strip()
+    if motivo_cancelamento:
+        erros.append(f'Cancelamento identificado: {motivo_cancelamento}')
+    return (len(erros) == 0, erros)
+
+
 def validar_dados_processamento(
     db_manager: DatabaseManager,
     id_proposta_isize: Optional[str] = None,
@@ -96,7 +147,7 @@ def validar_dados_processamento(
         is_valido = len(erros) == 0
         
         if not is_valido:
-            logger.warning(
+            logger.debug(
                 f"Registro {id_proposta_isize or codigo_externo or cpf} "
                 f"não é válido para processamento: {', '.join(erros)}"
             )
@@ -109,48 +160,41 @@ def filtrar_registros_validos(
     registros: List[Dict[str, Any]]
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Filtra registros válidos baseado na validação da tabela portabilidade_processamento
-    
-    Args:
-        db_manager: Instância do DatabaseManager
-        registros: Lista de registros a validar
-        
-    Returns:
-        Tupla (registros_validos, registros_invalidos) onde:
-        - registros_validos: Lista de registros que passaram na validação
-        - registros_invalidos: Lista de registros que falharam na validação
+    Filtra registros válidos baseado na validação da tabela portabilidade_processamento.
+    Usa validação em lote (1 query) em vez de 1 query por registro.
     """
     registros_validos = []
     registros_invalidos = []
-    
+    indice = _carregar_indice_processamento(db_manager)
+    if not indice:
+        logger.debug("Tabela portabilidade_processamento vazia ou inexistente - todos considerados válidos")
+        return registros, []
+
     for registro in registros:
-        # Tentar identificar o registro
-        id_proposta = registro.get('id_proposta_isize') or registro.get('codigo_externo') or registro.get('proposta_isize')
-        codigo_externo = registro.get('codigo_externo')
-        cpf = registro.get('cpf')
-        
-        is_valido, erros, dados_validacao = validar_dados_processamento(
-            db_manager,
-            id_proposta_isize=id_proposta,
-            codigo_externo=codigo_externo,
-            cpf=cpf
-        )
-        
+        id_proposta = (str(registro.get('id_proposta_isize') or registro.get('codigo_externo') or registro.get('proposta_isize') or '')).strip()
+        codigo_externo = (str(registro.get('codigo_externo') or '')).strip()
+        cpf = (str(registro.get('cpf') or '')).strip()
+        chave = id_proposta or codigo_externo or cpf
+        dados_validacao = (indice.get(id_proposta) or indice.get(codigo_externo) or indice.get(cpf)) if chave else None
+
+        if not dados_validacao:
+            registros_validos.append(registro)
+            continue
+
+        is_valido, erros = _validar_registro_em_memoria(dados_validacao, chave)
         if is_valido:
-            # Adicionar dados de validação ao registro se disponível
-            if dados_validacao:
-                registro['_validacao_status'] = dados_validacao.get('STATUS')
-                registro['_validacao_data_importacao'] = dados_validacao.get('data_importacao')
+            registro['_validacao_status'] = dados_validacao.get('STATUS')
+            registro['_validacao_data_importacao'] = dados_validacao.get('data_importacao')
             registros_validos.append(registro)
         else:
             registro['_erros_validacao'] = erros
             registros_invalidos.append(registro)
-    
+            logger.debug(f"Registro {chave} inválido: {', '.join(erros)}")
+
     logger.info(
         f"Validação concluída: {len(registros_validos)} válidos, "
         f"{len(registros_invalidos)} inválidos"
     )
-    
     return registros_validos, registros_invalidos
 
 

@@ -1,16 +1,44 @@
 """
 Parser para arquivos CSV de importação do Siebel
 Versão 2.0 - Adaptado para nova estrutura com triggers.xlsx
+Versão 2.1 - Suporte a cabeçalhos flexíveis (normalização por acentos/case)
 """
 import csv
 import logging
+import unicodedata
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 from pathlib import Path
 
 from src.models.portabilidade import PortabilidadeRecord, PortabilidadeStatus, StatusOrdem
 
 logger = logging.getLogger(__name__)
+
+# Mapeamento flexível: chave normalizada -> coluna esperada
+# Permite aceitar variações de título (CPF, cpf, Cpf, etc.)
+_CAMPO_CSV_ESPERADOS = [
+    ('Cpf', ['cpf', 'documento', 'cpf cliente', 'documento cliente']),
+    ('Número de acesso', ['numero de acesso', 'numero acesso', 'numero_acesso', 'num acesso']),
+    ('Número da ordem', ['numero da ordem', 'numero ordem', 'numero_ordem', 'num ordem', 'ordem', 'id ordem']),
+    ('Código externo', ['codigo externo', 'codigo_externo', 'cod externo', 'login externo']),
+    ('Número temporário', ['numero temporario', 'numero_temporario']),
+    ('Bilhete temporário', ['bilhete temporario', 'bilhete_temporario']),
+    ('Número do bilhete', ['numero do bilhete', 'numero bilhete', 'numero_bilhete']),
+    ('Status do bilhete', ['status do bilhete', 'status bilhete', 'status_bilhete']),
+    ('Operadora doadora', ['operadora doadora', 'operadora_doadora']),
+    ('Data da portabilidade', ['data da portabilidade', 'data portabilidade', 'data_portabilidade']),
+    ('Motivo da recusa', ['motivo da recusa', 'motivo recusa', 'motivo_recusa']),
+    ('Motivo do cancelamento', ['motivo do cancelamento', 'motivo cancelamento', 'motivo_cancelamento']),
+    ('Último bilhete de portabilidade?', ['ultimo bilhete', 'ultimo bilhete portabilidade']),
+    ('Status da ordem', ['status da ordem', 'status ordem', 'status_ordem']),
+    ('Preço da ordem', ['preco da ordem', 'preco ordem', 'preco_ordem']),
+    ('Data da conclusão da ordem', ['data conclusao ordem', 'data conclusao_ordem']),
+    ('Motivo de não ter sido consultado', ['motivo nao consultado', 'motivo nao_consultado']),
+    ('Responsável pelo processamento', ['responsavel processamento', 'responsavel_processamento']),
+    ('Data inicial do processamento', ['data inicial processamento']),
+    ('Data final do processamento', ['data final processamento']),
+    ('Registro válido?', ['registro valido', 'registro_valido']),
+]
 
 
 class CSVParser:
@@ -30,6 +58,67 @@ class CSVParser:
         "%Y-%m-%d %H:%M:%S.%f",   # 2025-07-17 08:00:00.123456 (com microsegundos)
     ]
     
+    @staticmethod
+    def _normalizar_cabecalho(texto: str) -> str:
+        """Normaliza texto para comparação: remove acentos, lowercase, strip"""
+        if not texto:
+            return ""
+        texto = str(texto).strip().lower()
+        # Remove acentos (NFD decompõe, depois remove combining chars)
+        texto = unicodedata.normalize('NFD', texto)
+        texto = ''.join(c for c in texto if unicodedata.category(c) != 'Mn')
+        # Remove caracteres especiais para match flexível
+        texto = ''.join(c if c.isalnum() or c in ' _' else '' for c in texto)
+        texto = ' '.join(texto.split())  # Normalizar espaços
+        return texto
+
+    @classmethod
+    def _mapear_cabecalhos_flexivel(cls, headers: List[str]) -> Dict[str, str]:
+        """
+        Mapeia cabeçalhos do arquivo para os nomes esperados.
+        Retorna dict: {header_original: nome_esperado}
+        """
+        mapeamento = {}
+        headers_norm = {cls._normalizar_cabecalho(h): h for h in headers if h}
+        
+        for esperado, variantes in _CAMPO_CSV_ESPERADOS:
+            encontrado = None
+            esperado_norm = cls._normalizar_cabecalho(esperado)
+            if esperado_norm in headers_norm:
+                encontrado = headers_norm[esperado_norm]
+            else:
+                for var in variantes:
+                    var_norm = cls._normalizar_cabecalho(var)
+                    if var_norm in headers_norm:
+                        encontrado = headers_norm[var_norm]
+                        break
+                    # Match parcial (contém)
+                    for h_norm, h_orig in headers_norm.items():
+                        if var_norm in h_norm or h_norm in var_norm:
+                            encontrado = h_orig
+                            break
+                    if encontrado:
+                        break
+            if encontrado:
+                mapeamento[encontrado] = esperado
+        
+        return mapeamento
+
+    @classmethod
+    def tem_estrutura_portabilidade(cls, headers: List[str]) -> bool:
+        """
+        Verifica se o arquivo tem estrutura de atualização portabilidade.
+        Requer pelo menos: CPF, número de acesso e código externo (ou número da ordem).
+        """
+        mapeamento = cls._mapear_cabecalhos_flexivel(headers)
+        valores_mapeados = [v.lower() for v in mapeamento.values()]
+        tem_cpf = any('cpf' in v or 'documento' in v for v in valores_mapeados)
+        tem_acesso = any('acesso' in v for v in valores_mapeados)
+        tem_ordem_ou_codigo = any(
+            'ordem' in v or 'codigo' in v or 'externo' in v for v in valores_mapeados
+        )
+        return tem_cpf and (tem_acesso or tem_ordem_ou_codigo)
+
     @staticmethod
     def parse_date(date_str: Optional[str]) -> Optional[datetime]:
         """Parse de data com múltiplos formatos"""
@@ -83,9 +172,62 @@ class CSVParser:
         return None
     
     @classmethod
+    def _aplicar_mapeamento_row(cls, row: dict, mapeamento: Dict[str, str]) -> dict:
+        """Aplica mapeamento de colunas à linha, retornando row com nomes esperados."""
+        row_normalizado = {}
+        for col_orig, col_esperado in mapeamento.items():
+            if col_orig in row and row[col_orig] is not None:
+                row_normalizado[col_esperado] = row[col_orig]
+        return row_normalizado
+
+    @classmethod
     def parse_file(cls, file_path: str) -> List[PortabilidadeRecord]:
         """
-        Parse de arquivo CSV completo com detecção automática de encoding
+        Parse de arquivo CSV ou Excel completo.
+        Redireciona para o parser apropriado conforme extensão.
+        """
+        path = Path(file_path)
+        if path.suffix.lower() in ('.xlsx', '.xls'):
+            return cls.parse_excel_file(file_path)
+        return cls.parse_file_flexible(file_path)
+
+    @classmethod
+    def parse_excel_file(cls, file_path: str) -> List[PortabilidadeRecord]:
+        """
+        Parse de arquivo Excel com estrutura Siebel (portabilidade).
+        Aceita mesma estrutura do CSV: Cpf, Número de acesso, Código externo, etc.
+        """
+        import pandas as pd
+
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
+
+        df = pd.read_excel(file_path, engine='openpyxl', dtype=str)
+        headers = [str(c) for c in df.columns]
+        mapeamento = cls._mapear_cabecalhos_flexivel(headers)
+
+        records = []
+        for idx, row in df.iterrows():
+            row_dict = row.to_dict()
+            row_norm = cls._aplicar_mapeamento_row(row_dict, mapeamento) if mapeamento else row_dict
+            # Converter valores para string (Excel retorna float/nan para células vazias)
+            row_norm = {
+                k: ('' if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v).strip())
+                for k, v in row_norm.items()
+            }
+            record = cls._parse_row(row_norm)
+            if record:
+                records.append(record)
+
+        logger.info(f"Parseados {len(records)} registros do Excel {path.name}")
+        return records
+
+    @classmethod
+    def parse_file_flexible(cls, file_path: str) -> List[PortabilidadeRecord]:
+        """
+        Parse de arquivo CSV com mapeamento flexível de cabeçalhos.
+        Aceita variações de título (acentos, maiúsculas, sinônimos).
         
         Args:
             file_path: Caminho para o arquivo CSV
@@ -98,7 +240,6 @@ class CSVParser:
         if not Path(file_path).exists():
             raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
         
-        # Tentar diferentes encodings comuns
         encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1']
         encoding_usado = None
         file_content = None
@@ -108,25 +249,35 @@ class CSVParser:
                 with open(file_path, 'r', encoding=encoding, errors='replace') as f:
                     file_content = f.read()
                     encoding_usado = encoding
-                    logger.debug(f"Arquivo {file_path} lido com encoding: {encoding}")
                     break
             except (UnicodeDecodeError, LookupError):
                 continue
         
         if file_content is None:
             raise ValueError(
-                f"Erro ao ler arquivo {file_path}: nenhum encoding funcionou. "
-                f"Tentados: {', '.join(encodings)}"
+                f"Erro ao ler arquivo {file_path}: nenhum encoding funcionou."
             )
         
-        # Parse do CSV
         import io
         f = io.StringIO(file_content)
-        reader = csv.DictReader(f)
+        # Detectar delimitador (virgula ou ponto-e-virgula comum em PT-BR)
+        try:
+            sample = file_content[:4096]
+            dialect = csv.Sniffer().sniff(sample, delimiters=',;\t')
+        except csv.Error:
+            dialect = csv.excel  # fallback: virgula
+        f2 = io.StringIO(file_content)
+        reader = csv.DictReader(f2, dialect=dialect)
+        headers = reader.fieldnames or []
+        
+        mapeamento = cls._mapear_cabecalhos_flexivel(headers)
+        if mapeamento:
+            logger.debug(f"Headers mapeados: {list(mapeamento.values())[:5]}...")
         
         for row_num, row in enumerate(reader, start=2):
             try:
-                record = cls._parse_row(row)
+                row_norm = cls._aplicar_mapeamento_row(row, mapeamento) if mapeamento else row
+                record = cls._parse_row(row_norm)
                 if record:
                     records.append(record)
             except Exception as e:

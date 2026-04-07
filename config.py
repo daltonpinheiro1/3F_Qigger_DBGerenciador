@@ -4,6 +4,14 @@ Ajustado para Mac - caminhos locais sem nuvem
 """
 import os
 from pathlib import Path
+from urllib.parse import quote
+
+# Carregar variáveis do .env (credenciais SMB, etc.)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # ========== CAMINHOS PRINCIPAIS (Mac) ==========
 
@@ -13,6 +21,9 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 # Banco de dados - usar caminho absoluto no Mac
 DB_PATH = "/Applications/Documentos/Projetos_python/3F_Qigger_DBGerenciador/data/portabilidade.db"
+
+# Novo banco de dados v2 (normalizado, versionado)
+DB_V2_PATH = str(DATA_DIR / "portabilidade_v2.db")
 
 # Pasta de importações (arquivos CSV e XLSX de objetos)
 PASTA_IMPORTACOES = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
@@ -25,6 +36,10 @@ PASTA_IMPORTACOES = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
 PASTA_BASE_COVERTE_NETWORK = Path("/Volumes/02 Planejamento/02 - Relatórios/08 - Relatorios Cliente")
 ARQUIVO_BASE_COVERTE_NETWORK = Path("/Volumes/02 Planejamento/02 - Relatórios/08 - Relatorios Cliente/COVERTE BASE PROP.xlsx")
 PASTA_BASE_COVERTE_LOCAL = DATA_DIR / "entrada" / "excel"  # Fallback local
+
+# BS_VENDA_DU (Excel) - mesmo compartilhamento SMB: 02 Planejamento/08 - Relatorios Cliente
+ARQUIVO_BS_VENDA_DU_NETWORK = Path("/Volumes/02 Planejamento/02 - Relatórios/08 - Relatorios Cliente/BS_VENDA_DU.xlsx")
+PASTA_BS_VENDA_DU_LOCAL = DATA_DIR / "entrada" / "excel"  # Fallback local
 
 # Triggers (regras de decisão)
 TRIGGERS_PATH = PROJECT_ROOT / "triggers.xlsx"
@@ -44,20 +59,41 @@ PASTA_RETORNOS_BACKOFFICE = PASTA_RETORNOS / "backoffice"
 # Pasta de logs
 PASTA_LOGS = PROJECT_ROOT / "logs"
 
+# ========== CONFIGURAÇÃO DE PROXIES (Reprocessamento de Endereços) ==========
+
+# Arquivo com lista de proxies (um por linha, formato http://host:port)
+# Usado pelo ProxyManager no reprocessamento de endereços inválidos
+# Definir no .env: PROXY_FILE=data/proxies.txt ou deixar vazio para requisições diretas
+PROXY_FILE = os.getenv("PROXY_FILE", str(DATA_DIR / "proxies.txt"))
+
 # ========== ARQUIVOS DE SAÍDA ==========
 
 # Pasta de saída para arquivos de homologação (retornos do gerenciador)
 PASTA_SAIDA_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador")
 
 # Backup do banco na rede (SMB 07 Backoffice)
-# URL para montar: smb://files/07 Backoffice
+# Credenciais para montar conexão "files" (servidor SMB)
+# Definir no .env: SMB_USER=3f\dalton.pinheiro  SMB_PASSWORD=sua_senha
+SMB_USER = os.getenv("SMB_USER", "").strip()
+SMB_PASSWORD = os.getenv("SMB_PASSWORD", "").strip()
+
+def _smb_url(share: str) -> str:
+    """URL SMB com credenciais se definidas no .env."""
+    share_encoded = quote(share, safe="")
+    if SMB_USER and SMB_PASSWORD:
+        user_encoded = quote(SMB_USER, safe="")
+        pass_encoded = quote(SMB_PASSWORD, safe="")
+        return f"smb://{user_encoded}:{pass_encoded}@files/{share_encoded}"
+    return f"smb://files/{share}"
+
+# URL para montar 07 Backoffice (backup do banco)
+SMB_URL_07_BACKOFFICE = _smb_url("07 Backoffice")
 # Caminho local quando montado no macOS:
-SMB_URL_07_BACKOFFICE = "smb://files/07 Backoffice"
 BACKUP_REDE_DIR = Path("/Volumes/07 Backoffice/RETORNOS RPA - QIGGER/db.Portabilidade")
 BACKUP_REDE_PATH = str(BACKUP_REDE_DIR / "portabilidade.db")
 
 # Arquivos de homologação (usando caminho absoluto)
-OUTPUT_WPP = DATA_DIR / "homologacao_wpp.csv"
+OUTPUT_WPP = DATA_DIR / "homologacao_wpp.xlsx"
 OUTPUT_APROVISIONAMENTOS = DATA_DIR / "homologacao_aprovisionamentos.csv"
 OUTPUT_IMPORTACAO = DATA_DIR / "importacao_final.csv"
 OUTPUT_REABERTURA = DATA_DIR / "homologacao_reabertura.csv"
@@ -93,8 +129,10 @@ def load_config():
     config = {
         # Caminhos principais
         'DB_PATH': os.getenv('QIGGER_DB_PATH', DB_PATH),
+        'DB_V2_PATH': os.getenv('QIGGER_DB_V2_PATH', DB_V2_PATH),
         'PASTA_IMPORTACOES': os.getenv('QIGGER_PASTA_IMPORTACOES', str(PASTA_IMPORTACOES)),
         'TRIGGERS_PATH': os.getenv('QIGGER_TRIGGERS_PATH', str(TRIGGERS_PATH)),
+        'PROXY_FILE': os.getenv('PROXY_FILE', PROXY_FILE),
         
         # Pastas
         'PASTA_ENTRADA': os.getenv('QIGGER_PASTA_ENTRADA', str(PASTA_ENTRADA)),
@@ -111,7 +149,7 @@ def load_config():
         
         # Configurações de processamento
         'DELETE_AFTER_PROCESS': os.getenv('QIGGER_DELETE_AFTER', str(DELETE_AFTER_PROCESS)).lower() == 'true',
-        'BATCH_SIZE': int(os.getenv('QIGGER_BATCH_SIZE', BATCH_SIZE)),
+        'BATCH_SIZE': int(os.getenv('QIGGER_BATCH_SIZE', str(BATCH_SIZE))),
         'RECURSIVE_MONITORING': os.getenv('QIGGER_RECURSIVE', str(RECURSIVE_MONITORING)).lower() == 'true',
         
         # Configurações de log

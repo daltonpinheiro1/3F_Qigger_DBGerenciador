@@ -117,8 +117,9 @@ def main():
         TRIM(COALESCE(CAST(bc.proposta_isize AS TEXT), CAST(bc.codigo_externo AS TEXT), '')) = 
         TRIM(COALESCE(CAST(pr.codigo_externo AS TEXT), ''))
     )
-    WHERE bc.proposta_isize IN ({placeholders})
-       OR bc.codigo_externo IN ({placeholders})
+    WHERE (bc.proposta_isize IN ({placeholders})
+       OR bc.codigo_externo IN ({placeholders}))
+       AND (pr.status_bilhete IS NULL OR pr.status_bilhete NOT LIKE '%rejeicao sms%')
     ORDER BY bc.data_venda DESC
     """
     

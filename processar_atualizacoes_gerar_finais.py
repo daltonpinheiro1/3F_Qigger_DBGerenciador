@@ -10,7 +10,7 @@ import sys
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Configurar encoding UTF-8
 from src.utils.console_utils import setup_windows_console
@@ -67,7 +67,7 @@ except ImportError:
     PASTA_IMPORTACOES_ABSOLUTA = Path("/Applications/Documentos/IMPORTACOES_QIGGER")
     PASTA_ENTRADA = Path(__file__).parent / "data" / "entrada"
     PASTA_PROCESSADOS = Path(__file__).parent / "data" / "processados"
-    OUTPUT_WPP = Path(__file__).parent / "data" / "homologacao_wpp.csv"
+    OUTPUT_WPP = Path(__file__).parent / "data" / "homologacao_wpp.xlsx"
     OUTPUT_APROVISIONAMENTOS = Path(__file__).parent / "data" / "homologacao_aprovisionamentos.csv"
     OUTPUT_IMPORTACAO = Path(__file__).parent / "data" / "importacao_final.csv"
 
@@ -80,9 +80,13 @@ PASTA_PROCESSADOS.mkdir(parents=True, exist_ok=True)
 OUTPUT_WPP.parent.mkdir(parents=True, exist_ok=True)
 
 
-def processar_arquivos_atualizacao() -> Dict[str, Any]:
+def processar_arquivos_atualizacao(arquivos_especificos: Optional[List[str]] = None) -> Dict[str, Any]:
     """
-    Processa todos os arquivos CSV da pasta de entrada
+    Processa arquivos CSV de atualização (portabilidade_records).
+    Usa cabeçalho flexível - aceita variações de título (acentos, sinônimos).
+    
+    Args:
+        arquivos_especificos: Lista opcional de caminhos. Se informado, processa apenas esses arquivos.
     
     Returns:
         Estatísticas do processamento
@@ -94,24 +98,20 @@ def processar_arquivos_atualizacao() -> Dict[str, Any]:
         'arquivos': []
     }
     
-    # Buscar arquivos CSV (na pasta de importações e/ou entrada)
-    arquivos_csv = []
-    
-    # Buscar na pasta de importações absoluta
-    if PASTA_IMPORTACOES_ABSOLUTA.exists():
-        arquivos_importacoes = list(PASTA_IMPORTACOES_ABSOLUTA.glob("*.csv"))
-        arquivos_csv.extend(arquivos_importacoes)
-        logger.info(f"Encontrados {len(arquivos_importacoes)} arquivo(s) CSV em {PASTA_IMPORTACOES_ABSOLUTA}")
-    
-    # Buscar também na pasta relativa (se diferente)
-    if PASTA_ENTRADA.exists() and PASTA_ENTRADA != PASTA_IMPORTACOES_ABSOLUTA:
-        arquivos_relativos = list(PASTA_ENTRADA.glob("*.csv"))
-        arquivos_csv.extend(arquivos_relativos)
-        if arquivos_relativos:
-            logger.info(f"Encontrados {len(arquivos_relativos)} arquivo(s) CSV em {PASTA_ENTRADA}")
-    
-    # Remover duplicatas
-    arquivos_csv = list(set(arquivos_csv))
+    if arquivos_especificos:
+        ext_validas = ('.csv', '.xlsx', '.xls')
+        arquivos_csv = [Path(p) for p in arquivos_especificos if Path(p).exists() and Path(p).suffix.lower() in ext_validas]
+        logger.info(f"Processando {len(arquivos_csv)} arquivo(s) de portabilidade especificado(s)")
+    else:
+        # Buscar arquivos CSV (pasta de entrada primeiro, depois importações)
+        arquivos_csv = []
+        if PASTA_ENTRADA.exists():
+            arquivos_csv.extend(list(PASTA_ENTRADA.glob("*.csv")))
+            logger.info(f"Encontrados {len(list(PASTA_ENTRADA.glob('*.csv')))} arquivo(s) CSV em {PASTA_ENTRADA}")
+        if PASTA_IMPORTACOES_ABSOLUTA.exists() and PASTA_IMPORTACOES_ABSOLUTA != PASTA_ENTRADA:
+            arquivos_csv.extend(list(PASTA_IMPORTACOES_ABSOLUTA.glob("*.csv")))
+            logger.info(f"Encontrados {len(list(PASTA_IMPORTACOES_ABSOLUTA.glob('*.csv')))} arquivo(s) CSV em {PASTA_IMPORTACOES_ABSOLUTA}")
+        arquivos_csv = list(set(arquivos_csv))
     
     if not arquivos_csv:
         logger.warning(f"Nenhum arquivo CSV encontrado em {PASTA_IMPORTACOES_ABSOLUTA} ou {PASTA_ENTRADA}")
@@ -175,19 +175,14 @@ def processar_arquivos_atualizacao() -> Dict[str, Any]:
             
             if not records:
                 logger.warning("Nenhum registro válido encontrado.")
-                # Mover mesmo assim ao final do processo
+                # Mover para pasta padrão de destino (data/processados)
                 try:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     nome_com_timestamp = f"{arquivo_csv.stem}_{timestamp}{arquivo_csv.suffix}"
-                    if str(arquivo_csv.parent) == str(PASTA_IMPORTACOES_ABSOLUTA):
-                        pasta_processados_importacoes = PASTA_IMPORTACOES_ABSOLUTA / "processados"
-                        pasta_processados_importacoes.mkdir(parents=True, exist_ok=True)
-                        destino = pasta_processados_importacoes / nome_com_timestamp
-                    else:
-                        PASTA_PROCESSADOS.mkdir(parents=True, exist_ok=True)
-                        destino = PASTA_PROCESSADOS / nome_com_timestamp
+                    PASTA_PROCESSADOS.mkdir(parents=True, exist_ok=True)
+                    destino = PASTA_PROCESSADOS / nome_com_timestamp
                     arquivo_csv.rename(destino)
-                    logger.info(f"✓ Arquivo movido para processados (sem registros): {destino.name}")
+                    logger.info(f"✓ Arquivo movido para pasta de destino (sem registros): {destino.name}")
                 except Exception as ex:
                     logger.warning(f"⚠ Não foi possível mover arquivo: {ex}")
                 continue
@@ -226,20 +221,15 @@ def processar_arquivos_atualizacao() -> Dict[str, Any]:
             if result['copied_to']:
                 logger.info(f"✓ Planilhas geradas/copiadas para {len(result['copied_to'])} destino(s)")
             
-            # Sempre mover arquivo para processados ao final do processo (com timestamp)
+            # Sempre mover arquivo para pasta padrão de destino (data/processados)
             try:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 nome_com_timestamp = f"{arquivo_csv.stem}_{timestamp}{arquivo_csv.suffix}"
-                if str(arquivo_csv.parent) == str(PASTA_IMPORTACOES_ABSOLUTA):
-                    pasta_processados_importacoes = PASTA_IMPORTACOES_ABSOLUTA / "processados"
-                    pasta_processados_importacoes.mkdir(parents=True, exist_ok=True)
-                    destino = pasta_processados_importacoes / nome_com_timestamp
-                else:
-                    PASTA_PROCESSADOS.mkdir(parents=True, exist_ok=True)
-                    destino = PASTA_PROCESSADOS / nome_com_timestamp
+                PASTA_PROCESSADOS.mkdir(parents=True, exist_ok=True)
+                destino = PASTA_PROCESSADOS / nome_com_timestamp
                 if arquivo_csv.exists():
                     arquivo_csv.rename(destino)
-                    logger.info(f"✓ Arquivo movido para: {destino}")
+                    logger.info(f"✓ Arquivo movido para pasta de destino: {destino}")
             except Exception as e:
                 logger.warning(f"⚠ Não foi possível mover arquivo para processados: {e}")
             
@@ -250,20 +240,15 @@ def processar_arquivos_atualizacao() -> Dict[str, Any]:
         except Exception as e:
             logger.error(f"Erro ao processar arquivo {arquivo_csv.name}: {e}", exc_info=True)
             stats['erros'] += 1
-            # Mover mesmo em caso de erro para não reprocessar
+            # Mover para pasta padrão de destino mesmo em caso de erro (não reprocessar)
             try:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 nome_com_timestamp = f"{arquivo_csv.stem}_{timestamp}_erro{arquivo_csv.suffix}"
                 if arquivo_csv.exists():
-                    if str(arquivo_csv.parent) == str(PASTA_IMPORTACOES_ABSOLUTA):
-                        pasta_processados_importacoes = PASTA_IMPORTACOES_ABSOLUTA / "processados"
-                        pasta_processados_importacoes.mkdir(parents=True, exist_ok=True)
-                        destino = pasta_processados_importacoes / nome_com_timestamp
-                    else:
-                        PASTA_PROCESSADOS.mkdir(parents=True, exist_ok=True)
-                        destino = PASTA_PROCESSADOS / nome_com_timestamp
+                    PASTA_PROCESSADOS.mkdir(parents=True, exist_ok=True)
+                    destino = PASTA_PROCESSADOS / nome_com_timestamp
                     arquivo_csv.rename(destino)
-                    logger.info(f"✓ Arquivo movido para processados (após erro): {destino.name}")
+                    logger.info(f"✓ Arquivo movido para pasta de destino (após erro): {destino.name}")
             except Exception as ex:
                 logger.warning(f"⚠ Não foi possível mover arquivo após erro: {ex}")
     
@@ -375,6 +360,7 @@ def gerar_arquivo_importacao() -> bool:
                     created_at, updated_at
                 FROM portabilidade_records
                 WHERE updated_at >= datetime('now', '-1 day')
+                  AND (status_bilhete IS NULL OR status_bilhete NOT LIKE '%rejeicao sms%')
                 ORDER BY updated_at DESC
             """)
             

@@ -35,7 +35,7 @@ SCRIPTS_HOMOLOGACAO = [
     {
         'nome': 'WPP',
         'script': 'gerar_homologacao_wpp.py',
-        'arquivo_origem': 'data/homologacao_wpp.csv',
+        'arquivo_origem': 'data/homologacao_wpp.xlsx',
         'prefixo_nome': 'homologacao_wpp'
     },
     {
@@ -55,6 +55,12 @@ SCRIPTS_HOMOLOGACAO = [
         'script': 'gerar_homologacao_erro_aprovisionamento.py',
         'arquivo_origem': 'data/homologacao_erro_aprovisionamento.xlsx',
         'prefixo_nome': 'homologacao_erro_aprovisionamento'
+    },
+    {
+        'nome': 'Entrega/Baixa',
+        'script': 'gerar_homologacao_entrega_baixa.py',
+        'arquivo_origem': 'data/homologacao_entrega_baixa.xlsx',
+        'prefixo_nome': 'homologacao_entrega_baixa'
     }
 ]
 

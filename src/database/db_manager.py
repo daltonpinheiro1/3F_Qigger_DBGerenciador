@@ -443,6 +443,9 @@ class DatabaseManager:
         """Cria índices otimizados para performance"""
         # Índices principais para portabilidade_records
         cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_codigo_externo ON portabilidade_records(codigo_externo)
+        """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_cpf ON portabilidade_records(cpf)
         """)
         cursor.execute("""
@@ -805,22 +808,26 @@ class DatabaseManager:
         """
         Context manager robusto para conexões com o banco de dados.
         
-        - Timeout de 30 segundos para evitar locks infinitos
+        - Timeout de 120s para locks (queries pesadas podem demorar)
+        - PRAGMA busy_timeout 5 min: espera mais em lock antes de falhar
         - Rollback automático em caso de erro
         - Fechamento garantido da conexão
         - Habilita foreign keys para integridade referencial
+        
+        Nota: SQLITE_INTERRUPT vem do cliente (ex.: timeout de query no DBeaver/DataGrip).
+        Aumente ou desative o "statement timeout" no cliente para queries longas (ex.: TIM_Port_Unificado).
         """
         conn = None
         try:
             conn = sqlite3.connect(
-                self.db_path, 
-                timeout=30.0,
-                isolation_level='DEFERRED',  # Melhor para concorrência
-                check_same_thread=False  # Permite uso em threads
+                self.db_path,
+                timeout=120.0,
+                isolation_level='DEFERRED',
+                check_same_thread=False
             )
             conn.row_factory = sqlite3.Row
-            # Habilitar foreign keys
             conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA busy_timeout = 300000")
             yield conn
             conn.commit()
         except sqlite3.OperationalError as e:

@@ -36,13 +36,82 @@ try:
     from config import DB_PATH, SMB_URL_07_BACKOFFICE, BACKUP_REDE_DIR, BACKUP_REDE_PATH
     DB_PATH_LOCAL = DB_PATH if isinstance(DB_PATH, str) else str(DB_PATH)
     SMB_URL_BACKOFFICE = SMB_URL_07_BACKOFFICE
-    BACKUP_REDE_DIR = Path(BACKUP_REDE_DIR) if not isinstance(BACKUP_REDE_DIR, Path) else BACKUP_REDE_DIR
+    BACKUP_REDE_DIR = Path(BACKUP_REDE_DIR) if not isinstance(BACKUP_REDE_DIR, Path) else Path(BACKUP_REDE_DIR)
     BACKUP_REDE_PATH = BACKUP_REDE_PATH if isinstance(BACKUP_REDE_PATH, str) else str(BACKUP_REDE_DIR / "portabilidade.db")
 except ImportError:
     DB_PATH_LOCAL = "/Applications/Documentos/Projetos_python/3F_Qigger_DBGerenciador/data/portabilidade.db"
     SMB_URL_BACKOFFICE = "smb://files/07 Backoffice"
     BACKUP_REDE_DIR = Path("/Volumes/07 Backoffice/RETORNOS RPA - QIGGER/db.Portabilidade")
     BACKUP_REDE_PATH = str(BACKUP_REDE_DIR / "portabilidade.db")
+
+# Banco de dados v2 (novo schema normalizado) — opcional, compatibilidade retroativa
+try:
+    from config import DB_V2_PATH as _CFG_DB_V2_PATH
+    DB_PATH_V2 = str(_CFG_DB_V2_PATH) if _CFG_DB_V2_PATH else None
+except ImportError:
+    DB_PATH_V2 = None
+
+# Ponto de montagem do SMB 07 Backoffice (para montagem automática)
+SMB_BACKOFFICE_MOUNT = Path("/Volumes/07 Backoffice")
+
+# URL segura para log (sem credenciais)
+SMB_URL_BACKOFFICE_LOG = "smb://files/07 Backoffice"
+
+
+def _verificar_smb_backoffice_montado() -> bool:
+    """Verifica se o compartilhamento SMB 07 Backoffice está montado."""
+    if not SMB_BACKOFFICE_MOUNT.exists() or not SMB_BACKOFFICE_MOUNT.is_dir():
+        return False
+    try:
+        list(SMB_BACKOFFICE_MOUNT.iterdir())
+        return True
+    except (PermissionError, OSError):
+        return False
+
+
+def _montar_smb_backoffice() -> bool:
+    """Monta o compartilhamento SMB 07 Backoffice no macOS (usa credenciais do .env se definidas)."""
+    import platform
+    if platform.system() != 'Darwin':
+        logger.warning("Montagem SMB automática disponível apenas no macOS")
+        return False
+    if _verificar_smb_backoffice_montado():
+        return True
+    logger.info(f"Tentando montar SMB: {SMB_URL_BACKOFFICE_LOG} (credenciais do .env)")
+    try:
+        try:
+            if not SMB_BACKOFFICE_MOUNT.exists():
+                SMB_BACKOFFICE_MOUNT.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            # /Volumes só pode ser criado por root; usar open com URL (credenciais no .env)
+            subprocess.run(['open', SMB_URL_BACKOFFICE], capture_output=True, text=True, timeout=15)
+            import time
+            for _ in range(15):
+                time.sleep(1)
+                if _verificar_smb_backoffice_montado():
+                    logger.info(f"✓ SMB montado via open: {SMB_BACKOFFICE_MOUNT}")
+                    return True
+            logger.warning("Monte pelo Finder: Cmd+K > smb://files/07 Backoffice")
+            return False
+        result = subprocess.run(
+            ['mount', '-t', 'smbfs', SMB_URL_BACKOFFICE, str(SMB_BACKOFFICE_MOUNT)],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            logger.info(f"✓ SMB montado: {SMB_BACKOFFICE_MOUNT}")
+            return True
+        subprocess.run(['open', SMB_URL_BACKOFFICE], capture_output=True, text=True, timeout=10)
+        import time
+        for _ in range(15):
+            time.sleep(1)
+            if _verificar_smb_backoffice_montado():
+                return True
+        return False
+    except Exception as e:
+        logger.warning(f"Não foi possível montar SMB automaticamente: {e}")
+        return False
 
 
 def backup_sqlite_seguro(src_path: str, dst_path: str) -> bool:
@@ -86,6 +155,80 @@ def backup_sqlite_seguro(src_path: str, dst_path: str) -> bool:
         return False
 
 
+def _registrar_backup_v2(nome_arquivo: str, caminho_destino: str, destino_tipo: str,
+                          tamanho_bytes: int = None, status: str = 'sucesso',
+                          detalhes_erro: str = None):
+    """
+    Registra backup na tabela historico_backups do banco v2 (se disponível).
+
+    Args:
+        nome_arquivo: Nome do arquivo de backup.
+        caminho_destino: Caminho completo do destino.
+        destino_tipo: Tipo de destino ('local', 'rede', 'smb').
+        tamanho_bytes: Tamanho do arquivo em bytes.
+        status: Status do backup ('sucesso', 'falha', 'parcial').
+        detalhes_erro: Detalhes do erro (se houver).
+    """
+    if not DB_PATH_V2 or not Path(DB_PATH_V2).exists():
+        return
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH_V2)
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            """INSERT INTO historico_backups
+               (nome_arquivo, caminho_destino, destino_tipo, tamanho_bytes, status, detalhes_erro)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (nome_arquivo, caminho_destino, destino_tipo, tamanho_bytes, status, detalhes_erro)
+        )
+        conn.commit()
+        conn.close()
+        logger.debug("Backup registrado no banco v2: %s (%s)", nome_arquivo, destino_tipo)
+    except Exception as e:
+        logger.debug("Não foi possível registrar backup no banco v2: %s", e)
+
+
+def _replicar_v2_para_rede(dst_dir: Path):
+    """
+    Replica o banco v2 para a pasta de rede (se existir).
+
+    Args:
+        dst_dir: Diretório de destino na rede.
+    """
+    if not DB_PATH_V2 or not Path(DB_PATH_V2).exists():
+        return
+
+    dst_v2 = str(dst_dir / "portabilidade_v2.db")
+    temp_v2 = Path("/tmp/portabilidade_v2_temp_backup.db")
+
+    try:
+        logger.info("Replicando banco v2 para rede...")
+        if backup_sqlite_seguro(DB_PATH_V2, str(temp_v2)):
+            shutil.copy2(temp_v2, dst_v2)
+            size_mb = Path(dst_v2).stat().st_size / (1024 * 1024)
+            logger.info(f"✅ Replicação v2 concluída: {size_mb:.2f} MB")
+            _registrar_backup_v2("portabilidade_v2.db", dst_v2, "rede",
+                                 tamanho_bytes=int(size_mb * 1024 * 1024))
+        else:
+            logger.warning("Fallback v2: cópia direta")
+            shutil.copy2(DB_PATH_V2, dst_v2)
+            size_mb = Path(dst_v2).stat().st_size / (1024 * 1024)
+            logger.info(f"✅ Replicação v2 concluída (fallback): {size_mb:.2f} MB")
+            _registrar_backup_v2("portabilidade_v2.db", dst_v2, "rede",
+                                 tamanho_bytes=int(size_mb * 1024 * 1024))
+    except Exception as e:
+        logger.warning(f"Não foi possível replicar banco v2 para rede: {e}")
+        _registrar_backup_v2("portabilidade_v2.db", dst_v2, "rede",
+                             status="falha", detalhes_erro=str(e))
+    finally:
+        if temp_v2.exists():
+            try:
+                temp_v2.unlink()
+            except OSError:
+                pass
+
+
 def replicar_para_rede(db_path: str = None) -> bool:
     """
     Replica o banco de dados para a pasta de rede (Backoffice)
@@ -106,11 +249,17 @@ def replicar_para_rede(db_path: str = None) -> bool:
         logger.error(f"Banco de dados não encontrado: {src}")
         return False
     
-    # Verificar se a pasta de rede (SMB) está acessível
+    # Verificar se a pasta de rede (SMB) está acessível; se não, tentar montar
+    if not _verificar_smb_backoffice_montado():
+        logger.info("Pasta de rede não montada. Tentando montar SMB automaticamente...")
+        if _montar_smb_backoffice():
+            logger.info("✓ Compartilhamento SMB montado com sucesso")
+        else:
+            logger.warning(f"Pasta de rede não acessível: {SMB_BACKOFFICE_MOUNT}")
+            logger.info(f"Monte manualmente: Finder > Cmd+K > {SMB_URL_BACKOFFICE_LOG}")
+            return False
     if not dst_dir.parent.exists():
-        logger.warning(f"Pasta de rede não acessível: {dst_dir.parent}")
-        logger.info(f"Monte o compartilhamento SMB: {SMB_URL_BACKOFFICE}")
-        logger.info("  Finder > Cmd+K > Cole a URL acima > Conectar")
+        logger.warning(f"Pasta de destino não acessível: {dst_dir.parent}")
         return False
     
     # Criar diretório de destino se não existir
@@ -123,7 +272,7 @@ def replicar_para_rede(db_path: str = None) -> bool:
     logger.info("Replicando banco para rede (SMB Backoffice)...")
     logger.info(f"  Origem: {src}")
     logger.info(f"  Destino: {dst}")
-    logger.info(f"  (SMB: {SMB_URL_BACKOFFICE}/RETORNOS RPA - QIGGER/db.Portabilidade/portabilidade.db)")
+    logger.info(f"  (SMB: {SMB_URL_BACKOFFICE_LOG}/RETORNOS RPA - QIGGER/db.Portabilidade/portabilidade.db)")
     
     # Estratégia: criar backup local temporário, depois copiar para rede
     # (sqlite3 .backup não funciona bem com caminhos de rede diretamente)
@@ -134,13 +283,12 @@ def replicar_para_rede(db_path: str = None) -> bool:
         if backup_sqlite_seguro(src, str(temp_backup)):
             # 2. Copiar para rede
             shutil.copy2(temp_backup, dst)
-            
-            # 3. Verificar tamanho
             size_mb = Path(dst).stat().st_size / (1024 * 1024)
             logger.info(f"✅ Replicação concluída: {size_mb:.2f} MB")
-            
-            # 4. Remover temporário
-            temp_backup.unlink()
+            _registrar_backup_v2("portabilidade.db", dst, "rede",
+                                 tamanho_bytes=int(size_mb * 1024 * 1024))
+            # Replicar banco v2 se existir
+            _replicar_v2_para_rede(dst_dir)
             return True
         else:
             # Fallback: copiar diretamente (menos seguro, mas funciona)
@@ -148,14 +296,53 @@ def replicar_para_rede(db_path: str = None) -> bool:
             shutil.copy2(src, dst)
             size_mb = Path(dst).stat().st_size / (1024 * 1024)
             logger.info(f"✅ Replicação concluída (fallback): {size_mb:.2f} MB")
+            _registrar_backup_v2("portabilidade.db", dst, "rede",
+                                 tamanho_bytes=int(size_mb * 1024 * 1024))
+            # Replicar banco v2 se existir
+            _replicar_v2_para_rede(dst_dir)
             return True
-            
     except Exception as e:
         logger.error(f"❌ Falha na replicação para rede: {e}")
-        # Limpar temporário se existir
-        if temp_backup.exists():
-            temp_backup.unlink()
         return False
+    finally:
+        if temp_backup.exists():
+            try:
+                temp_backup.unlink()
+            except OSError as ex:
+                logger.warning(f"Não foi possível remover arquivo temporário: {ex}")
+
+
+def _criar_backup_v2(backup_dir: Path, timestamp: str):
+    """
+    Cria backup local do banco v2 (se existir).
+
+    Args:
+        backup_dir: Diretório de backups locais.
+        timestamp: Timestamp para o nome do arquivo.
+    """
+    if not DB_PATH_V2 or not Path(DB_PATH_V2).exists():
+        return
+
+    backup_name_v2 = f"portabilidade_v2_backup_{timestamp}.db"
+    backup_path_v2 = backup_dir / backup_name_v2
+
+    try:
+        if backup_sqlite_seguro(DB_PATH_V2, str(backup_path_v2)):
+            size_mb = backup_path_v2.stat().st_size / (1024 * 1024)
+            logger.info(f"✓ Backup v2 local criado: {backup_path_v2} ({size_mb:.2f} MB)")
+            _registrar_backup_v2(backup_name_v2, str(backup_path_v2), "local",
+                                 tamanho_bytes=int(size_mb * 1024 * 1024))
+        else:
+            # Fallback: cópia direta
+            shutil.copy2(DB_PATH_V2, backup_path_v2)
+            size_mb = backup_path_v2.stat().st_size / (1024 * 1024)
+            logger.info(f"✓ Backup v2 local criado (fallback): {backup_path_v2} ({size_mb:.2f} MB)")
+            _registrar_backup_v2(backup_name_v2, str(backup_path_v2), "local",
+                                 tamanho_bytes=int(size_mb * 1024 * 1024))
+    except Exception as e:
+        logger.warning(f"Não foi possível criar backup do banco v2: {e}")
+        _registrar_backup_v2(backup_name_v2, str(backup_path_v2), "local",
+                             status="falha", detalhes_erro=str(e))
 
 
 def criar_backup(db_path: str = "data/portabilidade.db", replicar_rede: bool = True) -> str:
@@ -193,6 +380,13 @@ def criar_backup(db_path: str = "data/portabilidade.db", replicar_rede: bool = T
             size_mb = backup_path.stat().st_size / (1024 * 1024)
             logger.info(f"  Tamanho: {size_mb:.2f} MB")
             
+            # Registrar backup no banco v2
+            _registrar_backup_v2(backup_name, str(backup_path), "local",
+                                 tamanho_bytes=int(size_mb * 1024 * 1024))
+            
+            # Backup do banco v2 se existir
+            _criar_backup_v2(backup_dir, timestamp)
+            
             # Replicar para rede se solicitado
             if replicar_rede:
                 replicar_para_rede(str(db_file))
@@ -217,6 +411,13 @@ def criar_backup(db_path: str = "data/portabilidade.db", replicar_rede: bool = T
             # Verificar tamanho
             size_mb = backup_path.stat().st_size / (1024 * 1024)
             logger.info(f"  Tamanho: {size_mb:.2f} MB")
+            
+            # Registrar backup no banco v2
+            _registrar_backup_v2(backup_name, str(backup_path), "local",
+                                 tamanho_bytes=int(size_mb * 1024 * 1024))
+            
+            # Backup do banco v2 se existir
+            _criar_backup_v2(backup_dir, timestamp)
             
             return str(backup_path)
         

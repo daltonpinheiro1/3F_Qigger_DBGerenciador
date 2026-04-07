@@ -51,24 +51,43 @@ from src.utils.objects_loader import ObjectsLoader
 from src.models.portabilidade import PortabilidadeRecord
 from src.utils.validar_processamento import filtrar_registros_validos, obter_estatisticas_validacao
 from src.utils.progress_bar import ProgressBar, log_progress
+from src.utils.data_integrity import sanitizar_valor, validar_integridade_linha
 from typing import Dict, Optional
 import pandas as pd
 
-# Caminhos (usar config centralizado)
+# Caminhos (usar config centralizado - data/ para processar_completo encontrar)
 try:
     from config import DB_PATH, OUTPUT_WPP, PASTA_SAIDA_HOMOLOGACAO
     OUTPUT_HOMOLOGACAO = Path(OUTPUT_WPP)
     # Base analítica agora vem do banco unificado (base_unificada) ou Excel processado
-    # Não precisa mais do arquivo CSV separado
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
 except ImportError:
-    # Fallback se config.py não existir - usar caminho absoluto
+    # Fallback: sempre data/ para consistência com processar_completo
     DB_PATH = str(Path(__file__).parent / "data" / "portabilidade.db")
-    OUTPUT_HOMOLOGACAO = Path("/Applications/Documentos/Projetos_python/Retornos do gerenciador/homologacao_wpp.csv")
+    OUTPUT_HOMOLOGACAO = Path(__file__).parent / "data" / "homologacao_wpp.xlsx"
     BASE_ANALITICA_PATH = Path("/dev/null")  # Placeholder que nunca existe
+
+# Importar QueriesV2 para código path V2 (primário) com fallback legado
+try:
+    from config import DB_V2_PATH
+    from src.database.queries_v2 import QueriesV2
+    _DB_V2_AVAILABLE = bool(DB_V2_PATH) and Path(DB_V2_PATH).exists()
+except (ImportError, Exception) as _v2_import_err:
+    DB_V2_PATH = None
+    _DB_V2_AVAILABLE = False
+
+# Respeitar flags --forcar-legado / --forcar-v2 propagadas via env vars
+import os as _os
+if _os.environ.get('QIGGER_FORCAR_LEGADO') == '1':
+    _DB_V2_AVAILABLE = False
+elif _os.environ.get('QIGGER_FORCAR_V2') == '1' and DB_V2_PATH:
+    _DB_V2_AVAILABLE = True
 
 # Garantir que pasta de saída existe
 OUTPUT_HOMOLOGACAO.parent.mkdir(parents=True, exist_ok=True)
+
+# Limite de dias para geração (apenas últimos N dias)
+DIAS_LIMITE_HOMOLOGACAO = 90
 
 # Palavras a ignorar ao extrair primeiro e último nome
 PALAVRAS_IGNORAR = {'e', 'de', 'da', 'do', 'das', 'dos', 'em', 'na', 'no', 'nas', 'nos'}
@@ -78,12 +97,12 @@ PALAVRAS_IGNORAR = {'e', 'de', 'da', 'do', 'das', 'dos', 'em', 'na', 'no', 'nas'
 # =============================================================================
 GOOGLE_SHEET_ID = '13qXylcL-wYbB4vDouI4d2rRazYQvaPEZneEmLx-lVtk'
 GOOGLE_SHEET_EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv'
-MAX_ENVIOS_POR_CLIENTE = 5  # Máximo de envios tipo 1 ou 2 antes de bloquear
+MAX_ENVIOS_POR_CLIENTE = 3  # Máximo de envios tipo 1 ou 2 antes de bloquear
 
 # =============================================================================
 # CONFIGURAÇÃO DE CONTROLE DE ENVIOS
 # =============================================================================
-MAX_TENTATIVAS_TEMPLATE = 5  # Máximo de tentativas por template 1 ou 2
+MAX_TENTATIVAS_TEMPLATE = 3  # Máximo de tentativas por template 1 ou 2
 HORAS_ENTRE_ENVIOS = 48  # Horas mínimas entre envios para o mesmo cliente (48h conforme solicitado)
 
 # =============================================================================
@@ -903,28 +922,78 @@ def gerar_arquivo_homologacao():
     # 2. Buscar registros com template sincronizando todas as tabelas do portabilidade.db
     print("[2] Buscando registros com template mapeado (sincronizando todas as tabelas)...")
     
-    with db_manager._get_connection() as conn:
-        cursor = conn.cursor()
-        
-        # Verificar quais tabelas existem
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tabelas_existentes = [row[0] for row in cursor.fetchall()]
-        tem_base_coverte = 'base_coverte_prop' in tabelas_existentes
-        tem_relatorio_objetos = 'relatorio_objetos' in tabelas_existentes
-        
-        if tem_base_coverte:
-            print("    >> Usando base_coverte_prop + portabilidade_records" + (" + relatorio_objetos" if tem_relatorio_objetos else ""))
-        else:
-            print("    >> Tabela base_coverte_prop não encontrada, usando apenas portabilidade_records")
-        
-        # Buscar registros ÚNICOS por codigo_externo E telefone_portado
-        # Remove duplicados garantindo um único registro por (codigo_externo, telefone_portado)
-        # FILTROS:
-        # - Apenas vendas com telefone_portado (não nova linha)
-        # - Excluir entregas canceladas/extraviadas
-        # - Apenas clientes com crivo_vendas = "APROVADA" (ou IDs forçados)
-        if tem_base_coverte:
-            query = """
+    # Data limite: apenas últimos 180 dias (ordenar do mais recente para mais antigo)
+    data_limite = (datetime.now() - timedelta(days=DIAS_LIMITE_HOMOLOGACAO)).strftime('%Y-%m-%d')
+    filtro_data_sql = ">= '" + data_limite + "'"
+    print(f"    >> Filtro: últimos {DIAS_LIMITE_HOMOLOGACAO} dias (a partir de {data_limite}) | Ordenação: mais recente primeiro")
+    
+    # --- V2 como fonte PRIMÁRIA, legado como fallback ---
+    rows = None
+    columns = None
+    _usou_v2 = False
+
+    if _DB_V2_AVAILABLE:
+        try:
+            import sqlite3 as _sqlite3
+            # Verificar existência da view vw_base_unificada antes de consultar
+            _conn_check = _sqlite3.connect(DB_V2_PATH)
+            try:
+                _view_ok = _conn_check.execute(
+                    "SELECT name FROM sqlite_master WHERE type='view' AND name='vw_base_unificada'"
+                ).fetchone() is not None
+            finally:
+                _conn_check.close()
+
+            if not _view_ok:
+                logger.error(
+                    "[V2] View vw_base_unificada não encontrada em %s — fallback para legado",
+                    DB_V2_PATH,
+                )
+                print("    >> [V2] ❌ View vw_base_unificada ausente no banco v2, usando fallback legado")
+            else:
+                print("    >> [V2] Banco v2 detectado, usando QueriesV2 como fonte primária...")
+                queries_v2 = QueriesV2(DB_V2_PATH)
+                registros_v2 = queries_v2.buscar_registros_wpp(dias_limite=DIAS_LIMITE_HOMOLOGACAO)
+                if registros_v2:
+                    columns = list(registros_v2[0].keys())
+                    rows = [tuple(r[c] for c in columns) for r in registros_v2]
+                    _usou_v2 = True
+                    logger.info("[V2] ✅ %d registros obtidos via QueriesV2.buscar_registros_wpp()", len(rows))
+                    print(f"    >> [V2] ✅ {len(rows)} registros obtidos via QueriesV2")
+                else:
+                    logger.warning("[V2] ⚠ QueriesV2.buscar_registros_wpp() retornou 0 registros — ATENÇÃO: V2 pode estar com dados desatualizados ou cache vazia. Usando fallback legado.")
+                    print("    >> [V2] ⚠ 0 registros retornados (cache desatualizada?), usando fallback legado")
+        except Exception as e:
+            logger.error("[V2] Erro ao usar QueriesV2, usando fallback legado: %s", e, exc_info=True)
+            print(f"    >> [V2] ❌ Fallback para legado: {e}")
+    else:
+        logger.info("[V2] Banco v2 não disponível (%s), usando legado", DB_V2_PATH)
+        print("    >> [V2] Banco v2 não disponível, usando legado")
+
+    # --- Fallback legado: só executa se V2 não retornou resultados ---
+    if not _usou_v2:
+        with db_manager._get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Verificar quais tabelas existem
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tabelas_existentes = [row[0] for row in cursor.fetchall()]
+            tem_base_coverte = 'base_coverte_prop' in tabelas_existentes
+            tem_relatorio_objetos = 'relatorio_objetos' in tabelas_existentes
+
+            if tem_base_coverte:
+                print("    >> [LEGADO] Usando base_coverte_prop + portabilidade_records" + (" + relatorio_objetos" if tem_relatorio_objetos else ""))
+            else:
+                print("    >> [LEGADO] Tabela base_coverte_prop não encontrada, usando apenas portabilidade_records")
+
+            # Buscar registros ÚNICOS por codigo_externo E telefone_portado
+            # Remove duplicados garantindo um único registro por (codigo_externo, telefone_portado)
+            # FILTROS:
+            # - Apenas vendas com telefone_portado (não nova linha)
+            # - Excluir entregas canceladas/extraviadas
+            # - Apenas clientes com crivo_vendas = "APROVADA" (ou IDs forçados)
+            if tem_base_coverte:
+                query = """
             WITH registros_filtrados AS (
                 SELECT 
                 -- Dados de portabilidade_records
@@ -1012,16 +1081,23 @@ def gerar_arquivo_homologacao():
                 """ if tem_relatorio_objetos else "") + """
                 WHERE bc.proposta_isize IS NOT NULL 
                   AND TRIM(COALESCE(bc.proposta_isize, bc.codigo_externo, '')) != ''
+                  -- FILTRO: Apenas últimos 180 dias (data_conectada ou data_venda)
+                  AND (
+                    (bc.data_conectada IS NULL AND bc.data_venda IS NULL)
+                    OR (COALESCE(SUBSTR(TRIM(CAST(bc.data_conectada AS TEXT)), 1, 10), SUBSTR(TRIM(CAST(bc.data_venda AS TEXT)), 1, 10), '9999-12-31')) """ + filtro_data_sql + """
+                  )
+                  -- FILTRO: Não exibir vendas com status_bilhete like rejeicao sms
+                  AND (pr.status_bilhete IS NULL OR pr.status_bilhete NOT LIKE '%rejeicao sms%')
                   -- FILTRO: Apenas vendas com telefone_portado (não nova linha)
                   AND bc.telefone_portado IS NOT NULL 
                   AND TRIM(COALESCE(bc.telefone_portado, '')) != ''
                   -- FILTRO: Excluir entregas canceladas ou extraviadas
-                  AND UPPER(TRIM(COALESCE(bc.status_correios, bc.status_loggi, bc.status_entrega_prevista, ''))) NOT IN ('CANCELADA', 'CANCELADO', 'EXTRAVIADA', 'EXTRAVIADO', 'EXTRAVIO')
+                  AND UPPER(TRIM(COALESCE(bc.status_correios, bc.status_loggi, bc.status_entrega_prevista, ''))) NOT IN ('CANCELADA', 'CANCELADO', 'EXTRAVIADA', 'EXTRAVIADO', 'EXTRAVIO', 'BAIXA', 'REMETENTE')
                   AND (
                       -- Registros normais: crivo_vendas = APROVADA com template
                       (
                           UPPER(TRIM(COALESCE(CAST(bc.crivo_vendas AS TEXT), ''))) = 'APROVADA'
-                          AND (pr.template IS NOT NULL OR bc.data_venda >= '2026-01-01')
+                          AND (pr.template IS NOT NULL OR (COALESCE(SUBSTR(TRIM(CAST(bc.data_venda AS TEXT)), 1, 10), '0000-00-00') """ + filtro_data_sql + """))
                       )
                       """ + (f"""
                       -- IDs forçados: incluir independente de crivo_vendas ou template
@@ -1083,10 +1159,10 @@ def gerar_arquivo_homologacao():
                 END DESC,
                 id DESC
             LIMIT 10000
-            """
-        else:
-            # Fallback: usar apenas portabilidade_records (com deduplicação)
-            query = """
+                """
+            else:
+                # Fallback: usar apenas portabilidade_records (com deduplicação)
+                query = """
             SELECT 
                 MAX(id) AS id, 
                 MAX(cpf) AS cpf, 
@@ -1121,15 +1197,16 @@ def gerar_arquivo_homologacao():
               AND template != ''
               AND template != '-'
               AND mapeado = 1
+              AND (status_bilhete IS NULL OR status_bilhete NOT LIKE '%rejeicao sms%')
             GROUP BY codigo_externo
             ORDER BY id DESC
             LIMIT 1000
-            """
-        
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        columns = [desc[0] for desc in cursor.description]
-        print(f"    >> {len(rows)} registros encontrados")
+                """
+
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            print(f"    >> [LEGADO] {len(rows)} registros encontrados")
     
     if not rows:
         print("Nenhum registro com template encontrado!")
@@ -1261,9 +1338,16 @@ def gerar_arquivo_homologacao():
     with ProgressBar(
         total=total_registros,
         desc="Gerando homologação WPP",
-        unit="registros"
+        unit="registros",
+        logger=logger,
+        log_interval_pct=10.0
     ) as pbar:
         for row_idx, row in enumerate(rows, 1):
+            # Log de evolução a cada 100 registros (visualização do progresso)
+            if row_idx % 100 == 0:
+                pct = (row_idx / total_registros * 100) if total_registros > 0 else 0
+                logger.info(f"  WPP: {row_idx}/{total_registros} ({pct:.1f}%) | homologados: {len(homologacao_data)} | {datetime.now().strftime('%H:%M:%S')}")
+            
             # Converter row para dict usando colunas
             row_dict = dict(zip(columns, row))
             
@@ -1338,9 +1422,8 @@ def gerar_arquivo_homologacao():
                     cpf=record.cpf
                 )
                 
-                # 2. Se não encontrou, tentar variações do código externo
+                # 2. Se não encontrou, tentar variações do código externo (lookup O(1) via índice)
                 if not obj_match and record.codigo_externo:
-                    # Tentar com zeros à esquerda
                     codigo_variacoes = [
                         record.codigo_externo,
                         record.codigo_externo.zfill(8),
@@ -1353,63 +1436,21 @@ def gerar_arquivo_homologacao():
                             if obj_match:
                                 break
                     
-                    # 3. Tentar buscar por nu_pedido usando o código externo
-                    # IMPORTANTE: Se houver múltiplos pedidos, usar sempre o mais recente
-                    if not obj_match and hasattr(objects_loader, '_index_by_nu_pedido'):
-                        # Coletar todos os matches primeiro
-                        matches_por_codigo = []
-                        codigo_target = str(record.codigo_externo).strip().lstrip('0')
-                        
-                        for nu_ped, obj in objects_loader._index_by_nu_pedido.items():
-                            codigo_obj = str(getattr(obj, 'codigo_externo', '')).strip().lstrip('0')
-                            # Verificar se o código externo do objeto corresponde
-                            if codigo_obj == codigo_target or \
-                               str(record.codigo_externo) in str(nu_ped) or \
-                               codigo_target in str(nu_ped):
-                                matches_por_codigo.append(obj)
-                        
-                        # Se encontrou múltiplos, escolher o mais recente por data
-                        if matches_por_codigo:
-                            # Ordenar por data de inserção ou criação (mais recente primeiro)
-                            matches_por_codigo.sort(
-                                key=lambda x: (
-                                    x.data_insercao or x.data_criacao_pedido or datetime.min
-                                ),
-                                reverse=True
-                            )
-                            obj_match = matches_por_codigo[0]  # Pegar o mais recente
-                    
-                    # 4. Tentar buscar todos os registros por CPF e encontrar o que tem código externo próximo
-                    # IMPORTANTE: Se houver múltiplos, usar sempre o mais recente
+                    # 3. Buscar por CPF (lista pequena, limitada) - preferir lookup direto
                     if not obj_match and record.cpf and hasattr(objects_loader, '_index_by_cpf'):
                         matches = objects_loader._index_by_cpf.get(record.cpf, [])
                         if matches:
-                            # Tentar encontrar o mais próximo do código externo
                             codigo_target = str(record.codigo_externo).strip().lstrip('0')
-                            matches_com_codigo = []
-                            
-                            for match in matches:
+                            for match in matches[:20]:  # Limitar a 20 primeiros (mais recentes)
                                 codigo_match = str(getattr(match, 'codigo_externo', '')).strip().lstrip('0')
-                                if codigo_match:
-                                    # Verificar se códigos são exatamente iguais ou muito próximos
-                                    if codigo_match == codigo_target or \
-                                       codigo_match.endswith(codigo_target[-6:]) or \
-                                       codigo_target.endswith(codigo_match[-6:]):
-                                        matches_com_codigo.append(match)
-                            
-                            # Se encontrou matches com código similar, escolher o mais recente
-                            if matches_com_codigo:
-                                # Ordenar por data (mais recente primeiro)
-                                matches_com_codigo.sort(
-                                    key=lambda x: (
-                                        x.data_insercao or x.data_criacao_pedido or datetime.min
-                                    ),
-                                    reverse=True
-                                )
-                                obj_match = matches_com_codigo[0]  # Pegar o mais recente
-                            # Se não encontrou similar, usar o mais recente de todos (primeiro da lista, já ordenado)
-                            elif matches:
-                                obj_match = matches[0]  # Primeiro já é o mais recente (ordenado no load)
+                                if codigo_match == codigo_target or (
+                                    codigo_match and codigo_target and
+                                    (codigo_match.endswith(codigo_target[-6:]) or codigo_target.endswith(codigo_match[-6:]))
+                                ):
+                                    obj_match = match
+                                    break
+                            if not obj_match and matches:
+                                obj_match = matches[0]
                 
                 # 5. Se ainda não encontrou e temos número de acesso, tentar buscar por ID ERP
                 if not obj_match and record.numero_acesso:
@@ -1871,54 +1912,55 @@ def gerar_arquivo_homologacao():
                 homologacao=len(homologacao_data)
             )
     
+    # Deduplicação por (cpf, telefone): manter apenas o mais recente (já vem ordenado pela query)
+    vistos_cpf_tel = set()
+    homologacao_dedup = []
+    for row_data in homologacao_data:
+        chave = (str(row_data.get('Cpf') or '').strip(), str(row_data.get('Telefone_Contato') or '').strip())
+        if chave in vistos_cpf_tel:
+            continue
+        vistos_cpf_tel.add(chave)
+        homologacao_dedup.append(row_data)
+    if len(homologacao_data) != len(homologacao_dedup):
+        print(f"    >> Deduplicação (cpf + telefone): {len(homologacao_data)} → {len(homologacao_dedup)} registros")
+    homologacao_data = homologacao_dedup
+
+    # [4.1] Sanitizar valores (None/NULL/NaN → string vazia)
+    for row_data in homologacao_data:
+        for key in row_data:
+            if isinstance(row_data[key], str):
+                row_data[key] = sanitizar_valor(row_data[key])
+            elif row_data[key] is None:
+                row_data[key] = ''
+
     # 5. Salvar arquivo de homologação
     print("\n[5] Salvando arquivo de homologação...")
     
     OUTPUT_HOMOLOGACAO.parent.mkdir(parents=True, exist_ok=True)
     
-    # Tentar salvar, se arquivo estiver aberto, usar nome temporário
+    colunas_principais = [
+        'Proposta_iSize', 'Cpf', 'NomeCliente', 'Telefone_Contato',
+        'Endereco', 'Numero', 'Complemento', 'Bairro', 'Cidade', 'UF', 'Cep', 'Ponto_Referencia',
+        'Cod_Rastreio', 'Data_Venda', 'Data_Conectada', 'Tipo_Comunicacao',
+        'Status_Disparo', 'DataHora_Disparo'
+    ]
+    colunas_homologacao = [
+        'Template_Triggers', 'O_Que_Aconteceu', 'Tentativas', 'Total_Classificacoes',
+        'Houve_Reclassificacao', 'Acao_Realizar'
+    ]
+    fieldnames = colunas_principais + colunas_homologacao
+
     output_path = OUTPUT_HOMOLOGACAO
     try:
-        # Testar se consegue escrever
-        with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-            pass
+        df = pd.DataFrame(homologacao_data, columns=fieldnames) if homologacao_data else pd.DataFrame(columns=fieldnames)
+        df.to_excel(output_path, index=False, engine='openpyxl', sheet_name='WPP')
     except PermissionError:
-        # Arquivo está aberto, usar nome temporário
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = OUTPUT_HOMOLOGACAO.parent / f"homologacao_wpp_{timestamp}.csv"
+        output_path = OUTPUT_HOMOLOGACAO.parent / f"homologacao_wpp_{timestamp}.xlsx"
         print(f"    >> Arquivo original está aberto, salvando como: {output_path.name}")
-    
-    with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-        if homologacao_data:
-            # Ordem das colunas principais (para Google Sheets)
-            colunas_principais = [
-                'Proposta_iSize', 'Cpf', 'NomeCliente', 'Telefone_Contato',
-                'Endereco', 'Numero', 'Complemento', 'Bairro', 'Cidade', 'UF', 'Cep', 'Ponto_Referencia',
-                'Cod_Rastreio', 'Data_Venda', 'Data_Conectada', 'Tipo_Comunicacao',
-                'Status_Disparo', 'DataHora_Disparo'
-            ]
-            
-            # Colunas de homologação ao final (conforme solicitado)
-            colunas_homologacao = [
-                'Template_Triggers',
-                'O_Que_Aconteceu',
-                'Tentativas',
-                'Total_Classificacoes',
-                'Houve_Reclassificacao',
-                'Acao_Realizar'
-            ]
-            
-            # Ordem completa
-            fieldnames = colunas_principais + colunas_homologacao
-            
-            # Escrever cabeçalho
-            f.write(';'.join(fieldnames) + '\n')
-            
-            # Escrever dados
-            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=';', extrasaction='ignore')
-            for row in homologacao_data:
-                writer.writerow(row)
-    
+        df = pd.DataFrame(homologacao_data, columns=fieldnames) if homologacao_data else pd.DataFrame(columns=fieldnames)
+        df.to_excel(output_path, index=False, engine='openpyxl', sheet_name='WPP')
+
     print(f"    >> Arquivo salvo em: {output_path}")
     
     # 5. Estatísticas

@@ -109,7 +109,8 @@ class QiggerDecisionEngine:
         logger.info("Regras recarregadas do triggers.xlsx")
     
     def process_record(self, record: PortabilidadeRecord, save_to_db: bool = True, 
-                       enrich_logistics: bool = True) -> List[DecisionResult]:
+                       enrich_logistics: bool = True,
+                       db_manager_v2=None) -> List[DecisionResult]:
         """
         Processa um registro aplicando regras do triggers.xlsx
         
@@ -117,6 +118,7 @@ class QiggerDecisionEngine:
             record: Registro de portabilidade a ser processado
             save_to_db: Se True, salva no banco de dados
             enrich_logistics: Se True, enriquece com dados de logística
+            db_manager_v2: Instância opcional de DatabaseManagerV2 para gravar decisões no novo schema
             
         Returns:
             Lista de resultados de decisão
@@ -228,6 +230,10 @@ class QiggerDecisionEngine:
                     
             except Exception as e:
                 logger.error(f"Erro ao salvar registro no banco: {e}")
+        
+        # Gravar decisões no novo schema v2 (opcional)
+        if db_manager_v2 is not None:
+            self._gravar_decisoes_v2(record, results, db_manager_v2)
         
         # Ordenar por prioridade
         results.sort(key=lambda x: x.priority)
@@ -627,6 +633,63 @@ class QiggerDecisionEngine:
         
         return None
     
+    def _gravar_decisoes_v2(self, record: PortabilidadeRecord, results: List[DecisionResult], db_manager_v2) -> None:
+        """
+        Grava decisões no novo schema v2 (tabela `decisoes` + auditoria).
+
+        Para cada resultado com regra aplicada, insere na tabela `decisoes`
+        e registra na auditoria com operacao='REGRA_APLICADA'.
+
+        Args:
+            record: Registro de portabilidade processado.
+            results: Lista de resultados de decisão.
+            db_manager_v2: Instância de DatabaseManagerV2.
+        """
+        proposta_isize = getattr(record, 'codigo_externo', None) or getattr(record, 'proposta_isize', None)
+        if not proposta_isize:
+            return
+
+        for result in results:
+            if result.regra_id is None:
+                continue
+            try:
+                import json as _json
+                # Inserir na tabela decisoes
+                db_manager_v2.inserir_registro('decisoes', {
+                    'proposta_isize': str(proposta_isize),
+                    'regra_id': result.regra_id,
+                    'decisao': result.decision or '',
+                    'o_que_aconteceu': result.o_que_aconteceu,
+                    'acao_a_realizar': result.acao_a_realizar,
+                    'tipo_mensagem': result.tipo_mensagem,
+                    'template': result.template,
+                    'detalhes': result.details,
+                    'tempo_execucao_ms': result.execution_time_ms,
+                })
+
+                # Registrar na auditoria com operacao='REGRA_APLICADA'
+                with db_manager_v2._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """INSERT INTO auditoria (tabela, operacao, chave_negocio, valores_json, detalhes, tempo_execucao_ms)
+                           VALUES (?, 'REGRA_APLICADA', ?, ?, ?, ?)""",
+                        (
+                            'decisoes',
+                            str(proposta_isize),
+                            _json.dumps({
+                                'regra_id': result.regra_id,
+                                'decisao': result.decision,
+                                'acao_a_realizar': result.acao_a_realizar,
+                            }, ensure_ascii=False),
+                            f"Regra {result.regra_id} aplicada: {result.decision}",
+                            result.execution_time_ms,
+                        ),
+                    )
+                    conn.commit()
+                logger.debug(f"v2: Decisão regra {result.regra_id} gravada para {proposta_isize}")
+            except Exception as e:
+                logger.warning(f"v2: Erro ao gravar decisão regra {result.regra_id}: {e}")
+
     def get_rules_stats(self) -> Dict:
         """Retorna estatísticas das regras"""
         return self.trigger_loader.get_rules_stats()

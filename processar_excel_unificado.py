@@ -7,6 +7,7 @@ O Excel é a fonte principal e atualiza automaticamente quando o arquivo na rede
 """
 import sys
 import logging
+import warnings
 from pathlib import Path
 from typing import Dict, Any, Optional
 import pandas as pd
@@ -72,6 +73,14 @@ SMB_PATH = "02 - Relatórios/08 - Relatorios Cliente"
 SMB_FILE = "COVERTE BASE PROP.xlsx"
 SMB_MOUNT_POINT = f"/Volumes/{SMB_SHARE}"
 
+# Credenciais SMB (do .env via config)
+def _credenciais_smb():
+    try:
+        from config import SMB_USER, SMB_PASSWORD
+        return (SMB_USER or None, SMB_PASSWORD or None)
+    except ImportError:
+        return (None, None)
+
 
 def verificar_conexao_smb() -> bool:
     """
@@ -96,14 +105,17 @@ def montar_compartilhamento_smb(usuario: str = None, senha: str = None) -> bool:
     Monta o compartilhamento SMB no macOS.
     
     Args:
-        usuario: Nome de usuário para autenticação (opcional, usa credenciais do Keychain)
-        senha: Senha para autenticação (opcional)
+        usuario: Nome de usuário para autenticação (opcional; se não informado, usa SMB_USER do .env)
+        senha: Senha para autenticação (opcional; usa SMB_PASSWORD do .env)
         
     Returns:
         True se montou com sucesso ou já estava montado
     """
     import subprocess
     import platform
+    
+    if usuario is None and senha is None:
+        usuario, senha = _credenciais_smb()
     
     if platform.system() != 'Darwin':
         logger.warning("Montagem SMB automática disponível apenas no macOS")
@@ -114,26 +126,40 @@ def montar_compartilhamento_smb(usuario: str = None, senha: str = None) -> bool:
         logger.info(f"✓ Compartilhamento SMB já está montado: {SMB_MOUNT_POINT}")
         return True
     
-    logger.info(f"Tentando montar compartilhamento SMB: smb://{SMB_SERVER}/{SMB_SHARE}")
+    from urllib.parse import quote
+    if usuario and senha:
+        smb_url = f"smb://{quote(usuario, safe='')}:{quote(senha, safe='')}@{SMB_SERVER}/{quote(SMB_SHARE, safe='')}"
+        smb_url_log = f"smb://{SMB_SERVER}/{SMB_SHARE} (credenciais do .env)"
+    elif usuario:
+        smb_url = f"smb://{usuario}@{SMB_SERVER}/{SMB_SHARE}"
+        smb_url_log = smb_url
+    else:
+        smb_url = f"smb://{SMB_SERVER}/{SMB_SHARE}"
+        smb_url_log = smb_url
+    logger.info(f"Tentando montar compartilhamento SMB: {smb_url_log}")
     
     try:
-        # Criar ponto de montagem se não existir
         mount_point = Path(SMB_MOUNT_POINT)
-        if not mount_point.exists():
-            mount_point.mkdir(parents=True, exist_ok=True)
+        # Em macOS, criar /Volumes/NOME exige permissão de root. Tentar mount só se o ponto já existir.
+        try:
+            if not mount_point.exists():
+                mount_point.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            # Ponto de montagem não existe e não temos permissão para criar em /Volumes
+            # Usar 'open' com URL (credenciais do .env): o sistema monta e cria o ponto
+            if usuario and senha:
+                logger.info("Ponto de montagem em /Volumes não acessível; usando open com credenciais do .env")
+                result = subprocess.run(['open', smb_url], capture_output=True, text=True, timeout=15)
+                import time
+                for _ in range(15):
+                    time.sleep(1)
+                    if verificar_conexao_smb():
+                        logger.info(f"✓ Compartilhamento SMB montado via open: {SMB_MOUNT_POINT}")
+                        return True
+            logger.warning("Não foi possível criar ponto de montagem em /Volumes (permissão). Monte pelo Finder: Cmd+K > smb://files/02 Planejamento")
+            return False
         
-        # Construir URL SMB
-        if usuario and senha:
-            # Com credenciais explícitas
-            smb_url = f"smb://{usuario}:{senha}@{SMB_SERVER}/{SMB_SHARE}"
-        elif usuario:
-            # Apenas usuário (senha será solicitada ou do Keychain)
-            smb_url = f"smb://{usuario}@{SMB_SERVER}/{SMB_SHARE}"
-        else:
-            # Usar credenciais do Keychain (mais seguro)
-            smb_url = f"smb://{SMB_SERVER}/{SMB_SHARE}"
-        
-        # Método 1: Tentar com mount_smbfs (silencioso, usa Keychain)
+        # Método 1: mount_smbfs com credenciais do .env
         result = subprocess.run(
             ['mount', '-t', 'smbfs', smb_url, str(mount_point)],
             capture_output=True,
@@ -144,28 +170,20 @@ def montar_compartilhamento_smb(usuario: str = None, senha: str = None) -> bool:
         if result.returncode == 0:
             logger.info(f"✓ Compartilhamento SMB montado com sucesso: {SMB_MOUNT_POINT}")
             return True
+        if result.stderr:
+            logger.debug(f"mount_smbfs: {result.stderr.strip()}")
         
-        # Método 2: Tentar com open (abre o Finder para montar interativamente)
-        logger.info("Tentando método alternativo via Finder...")
-        result = subprocess.run(
-            ['open', f'smb://{SMB_SERVER}/{SMB_SHARE}'],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        
-        # Aguardar um pouco para o Finder montar
+        # Método 2: open com URL (usa credenciais se tiver no .env)
+        logger.info("Tentando método alternativo via open...")
+        subprocess.run(['open', smb_url], capture_output=True, text=True, timeout=10)
         import time
-        for i in range(10):
+        for _ in range(15):
             time.sleep(1)
             if verificar_conexao_smb():
-                logger.info(f"✓ Compartilhamento SMB montado via Finder: {SMB_MOUNT_POINT}")
+                logger.info(f"✓ Compartilhamento SMB montado via open: {SMB_MOUNT_POINT}")
                 return True
         
-        logger.warning(f"⚠️ Não foi possível montar automaticamente. Monte manualmente:")
-        logger.warning(f"   1. Finder > Cmd+K (Conectar ao Servidor)")
-        logger.warning(f"   2. Digite: smb://{SMB_SERVER}/{SMB_SHARE}")
-        logger.warning(f"   3. Autentique com suas credenciais")
+        logger.warning("Não foi possível montar automaticamente. Monte pelo Finder: Cmd+K > smb://files/02 Planejamento (use usuário/senha do .env)")
         return False
         
     except subprocess.TimeoutExpired:
@@ -198,10 +216,11 @@ def obter_arquivo_coverte_smb() -> Optional[Path]:
         else:
             logger.warning(f"⚠️ Arquivo local inválido ou corrompido: {arquivo_local}")
     
-    # Tentar montar o compartilhamento SMB
+    # Tentar montar o compartilhamento SMB (com credenciais do .env se existirem)
     if not verificar_conexao_smb():
         logger.info("Compartilhamento SMB não montado. Tentando montar...")
-        if not montar_compartilhamento_smb():
+        user, senha = _credenciais_smb()
+        if not montar_compartilhamento_smb(usuario=user, senha=senha):
             return None
     
     # Construir caminho completo do arquivo
@@ -810,6 +829,7 @@ def criar_tabela_base_coverte_prop(db_manager: DatabaseManager):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_coverte_proposta_isize ON base_coverte_prop(proposta_isize)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_coverte_data_importacao ON base_coverte_prop(data_importacao)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_coverte_updated_at ON base_coverte_prop(updated_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_coverte_data_venda ON base_coverte_prop(data_venda)")
         
         conn.commit()
         # Migrar tabela se necessário (remover colunas ddd_telefone_1 e ddd_telefone_2)
@@ -902,6 +922,7 @@ def criar_tabela_base_coverte_prop(db_manager: DatabaseManager):
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_coverte_proposta_isize ON base_coverte_prop(proposta_isize)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_coverte_data_importacao ON base_coverte_prop(data_importacao)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_coverte_updated_at ON base_coverte_prop(updated_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_coverte_data_venda ON base_coverte_prop(data_venda)")
             
             conn.commit()
             logger.info(f"Migração concluída: {len(registros)} registros migrados")
@@ -911,7 +932,8 @@ def criar_tabela_base_coverte_prop(db_manager: DatabaseManager):
 
 def processar_excel_unificado(
     arquivo_excel: Path,
-    db_path: str = DB_PATH
+    db_path: str = DB_PATH,
+    forcar_processamento: bool = False
 ) -> Dict[str, int]:
     """
     Processa arquivo Excel unificado e insere no banco de dados
@@ -952,9 +974,11 @@ def processar_excel_unificado(
     criar_tabela_base_coverte_prop(db_manager)
     
     try:
-        # Ler arquivo Excel
+        # Ler arquivo Excel (suprimir avisos de datas inválidas no Excel)
         logger.info("Lendo arquivo Excel...")
-        df = pd.read_excel(arquivo_excel, engine='openpyxl', dtype=str)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*outside the limits for dates.*")
+            df = pd.read_excel(arquivo_excel, engine='openpyxl', dtype=str)
         
         stats['total_linhas'] = len(df)
         logger.info(f"Total de linhas no Excel: {stats['total_linhas']}")
@@ -971,7 +995,7 @@ def processar_excel_unificado(
         colunas_objetos = ['NU PEDIDO', 'ID DO OBJETO', 'DESTINATARIO']
         colunas_encontradas_objetos = [c for c in colunas_objetos if c in colunas_normalizadas]
         
-        is_coverte_prop = len(colunas_encontradas_coverte) >= 2  # Pelo menos 2 colunas características
+        is_coverte_prop = len(colunas_encontradas_coverte) >= 2 or forcar_processamento
         is_relatorio_objetos = len(colunas_encontradas_objetos) >= 2 and not is_coverte_prop
         
         if is_coverte_prop:
@@ -993,7 +1017,7 @@ def processar_excel_unificado(
         if len(df.columns) > 20:
             logger.info(f"  ... e mais {len(df.columns) - 20} colunas")
         
-        # Se não for COVERTE BASE PROP, PARAR o processamento
+        # Se não for COVERTE BASE PROP e não forçado, PARAR o processamento
         if not is_coverte_prop:
             logger.error("=" * 70)
             logger.error("ERRO: Este arquivo NÃO é COVERTE BASE PROP!")
@@ -1019,7 +1043,9 @@ def processar_excel_unificado(
             with ProgressBar(
                 total=stats['total_linhas'],
                 desc="Processando Excel",
-                unit="linhas"
+                unit="linhas",
+                logger=logger,
+                log_interval_pct=10.0
             ) as pbar:
                 for idx, row in df.iterrows():
                     try:

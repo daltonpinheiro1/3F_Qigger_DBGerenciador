@@ -22,9 +22,13 @@ wheels/
 
 # Virtual Environment
 venv/
+.venv/
 ENV/
 env/
-.venv
+
+# Credenciais (nunca versionar)
+.env
+.env.local
 
 # IDEs
 .vscode/
@@ -92,4 +96,16 @@ data/amostra_validacao_templates.csv
 
 # Arquivos de dados temporários
 data/C337E030
+data/entrada/
+data/backups/
+backups/
 
+# Pastas obsoletas
+path/
+
+
+# Arquivos de dados grandes (não versionar)
+data/*.xlsx
+data/*.csv
+data/*.db.backup_*
+data/v2/

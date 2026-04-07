@@ -1,23 +1,30 @@
 # 3F Qigger DB Gerenciador - Dependências
 
 # Core - OBRIGATÓRIAS
-python-dateutil>=2.8.2
-watchdog>=3.0.0
-openpyxl>=3.1.0  # Para gerar arquivos Excel (XLSX)
-pandas>=2.0.0  # Para manipulação de dados e CSV
+python-dotenv>=1.0.0      # Variáveis de ambiente (.env) para credenciais SMB
+python-dateutil>=2.9.0
+watchdog>=6.0.0
+openpyxl>=3.1.5           # Gerar/ler arquivos Excel (XLSX)
+pandas>=3.0.0             # Manipulação de dados, CSV e Excel
 
 # Banco de dados (SQLite já vem com Python)
 
-# Testes (opcional, mas recomendado)
-pytest>=7.4.0
-pytest-cov>=4.1.0
-pytest-mock>=3.11.1
-
-# Desenvolvimento (opcional)
-black>=23.7.0
-flake8>=6.1.0
-mypy>=1.5.0
-
-# Progresso (opcional, mas recomendado)
+# Progresso
 tqdm>=4.66.0
 
+# HTTP (Google Sheets, APIs de CEP, geocodificação, proxy rotation)
+requests>=2.32.0
+
+# Excel legado .xls (opcional - se precisar ler arquivos .xls antigos)
+xlrd>=2.0.0
+
+# Testes
+pytest>=9.0.0
+pytest-cov>=7.0.0
+pytest-mock>=3.15.0
+hypothesis>=6.100.0       # Testes de propriedade (PBT)
+
+# Desenvolvimento (opcional)
+# black>=26.1.0
+# flake8>=7.3.0
+# mypy>=1.19.0

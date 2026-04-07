@@ -1,9 +1,11 @@
 """
 Utilitário para exibir barras de progresso durante processamento
 Suporta múltiplos modos: tqdm (se disponível) ou barra customizada simples
+Opcionalmente registra progresso no logger em intervalos (para arquivo de log)
 """
 import sys
 import time
+import logging
 from typing import Optional, Iterator, Any
 from datetime import datetime
 
@@ -26,16 +28,13 @@ class ProgressBar:
         total: int,
         desc: str = "Processando",
         unit: str = "it",
-        disable: bool = False
+        disable: bool = False,
+        logger: Optional[logging.Logger] = None,
+        log_interval_pct: float = 10.0
     ):
         """
-        Inicializa barra de progresso
-        
-        Args:
-            total: Total de itens a processar
-            desc: Descrição do processo
-            unit: Unidade (itens, registros, linhas, etc)
-            disable: Se True, desabilita a barra
+        Inicializa barra de progresso.
+        logger: se informado, registra progresso no log a cada log_interval_pct%%.
         """
         self.total = total
         self.desc = desc
@@ -44,6 +43,9 @@ class ProgressBar:
         self.current = 0
         self.start_time = time.time()
         self.last_update = 0
+        self.logger = logger
+        self.log_interval_pct = max(0.1, float(log_interval_pct))
+        self._last_log_pct = -1.0
         
         if not disable and HAS_TQDM:
             self.bar = tqdm(
@@ -57,6 +59,8 @@ class ProgressBar:
             self.bar = None
             if not disable:
                 print(f"{desc}: 0/{total} {unit} (0%)", end='', flush=True)
+        if self.logger and self.total > 0:
+            self.logger.info(f"[Progresso] {desc}: 0/{total} {unit} (0%)")
     
     def update(self, n: int = 1):
         """Atualiza a barra de progresso"""
@@ -79,6 +83,18 @@ class ProgressBar:
                       f"[{self._format_time(elapsed)}<{self._format_time(remaining)}, {rate:.1f}{self.unit}/s]",
                       end='', flush=True)
                 self.last_update = percent
+        
+        # Registrar no log em intervalos (ex.: 10%, 20%, ...)
+        if self.logger and self.total > 0:
+            pct = (self.current / self.total * 100)
+            if pct >= self._last_log_pct + self.log_interval_pct or self.current >= self.total:
+                self._last_log_pct = (pct // self.log_interval_pct) * self.log_interval_pct
+                elapsed = time.time() - self.start_time
+                rate = self.current / elapsed if elapsed > 0 else 0
+                self.logger.info(
+                    f"[Progresso] {self.desc}: {self.current}/{self.total} {self.unit} ({pct:.1f}%) "
+                    f"[{self._format_time(elapsed)}, {rate:.1f}{self.unit}/s]"
+                )
     
     def set_description(self, desc: str):
         """Atualiza a descrição"""
@@ -101,6 +117,11 @@ class ProgressBar:
             print(f"\r{self.desc}: {self.current}/{self.total} {self.unit} (100%) "
                   f"[{self._format_time(elapsed)}] - Concluído!                    ")
             print()  # Nova linha
+        if self.logger and self.total > 0:
+            elapsed = time.time() - self.start_time
+            self.logger.info(
+                f"[Progresso] {self.desc}: {self.current}/{self.total} {self.unit} (100%) - Concluído em {self._format_time(elapsed)}"
+            )
     
     def _format_time(self, seconds: float) -> str:
         """Formata tempo em formato legível"""
