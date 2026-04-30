@@ -209,8 +209,14 @@ def detectar_tipo_arquivo_por_cabecalho(arquivo: Path) -> str:
     """
     Detecta o tipo de arquivo pelo cabeçalho (não pelo nome).
     Retorna: 'csv_portabilidade', 'excel_portabilidade', 'csv_relatorio_faturamento',
-             'excel_base_coverte', 'excel_relatorio_objetos', 'excel_gross', 'desconhecido'
+             'excel_base_coverte', 'excel_relatorio_objetos', 'excel_gross',
+             'telegram', 'desconhecido'
     """
+    # Detecção rápida por nome para Telegram (antes de abrir o arquivo)
+    nome_lower = arquivo.name.lower()
+    if 'telegram' in nome_lower:
+        return 'telegram'
+
     try:
         if arquivo.suffix.lower() == '.csv':
             from src.utils.csv_parser import CSVParser
@@ -343,7 +349,7 @@ def processar_arquivos_pasta_entrada_unificado(
         'tim_pre_controle': 0,
         'estornos': 0,
         'ignorados': 0,
-        'erros': 0
+        'erros': 0,
     }
 
     pastas = [pasta_entrada]
@@ -463,6 +469,23 @@ def processar_arquivos_pasta_entrada_unificado(
                 except Exception as e:
                     logger.error(f"  Erro: {e}")
                     stats['erros'] += 1
+                # Auditoria RPA: processar pelo pipeline de auditoria ANTES de mover
+                if db_v2 and arquivo.suffix.lower() == '.csv' and arquivo.exists():
+                    try:
+                        from src.pipeline_auditoria.classificador_status import ClassificadorStatus
+                        from src.pipeline_auditoria.processador_retorno_rpa import ProcessadorRetornoRPA
+                        _classificador = ClassificadorStatus()
+                        _proc_rpa = ProcessadorRetornoRPA(_classificador)
+                        _rpa_stats = _proc_rpa.processar_arquivo(str(arquivo), db_v2)
+                        if _rpa_stats.get('inseridos', 0) > 0:
+                            stats.setdefault('auditoria_rpa_inseridos', 0)
+                            stats['auditoria_rpa_inseridos'] += _rpa_stats['inseridos']
+                            logger.info(
+                                "  ✓ Auditoria RPA: %d registros → retornos_rpa_tim",
+                                _rpa_stats['inseridos'],
+                            )
+                    except Exception as e:
+                        logger.warning(f"  ⚠ Auditoria RPA: {e}")
                 # v2: importar no novo banco
                 if db_v2 and importador_v2 and arquivo.exists():
                     _processar_arquivo_v2(arquivo, db_v2, importador_v2)
@@ -499,6 +522,24 @@ def processar_arquivos_pasta_entrada_unificado(
                 # v2: importar no novo banco antes de mover
                 if db_v2 and importador_v2 and arquivo.exists():
                     _processar_arquivo_v2(arquivo, db_v2, importador_v2)
+                _mover_para_processados(arquivo)
+
+            elif tipo == 'telegram':
+                try:
+                    from processar_dados_cadastrais_telegram import processar_dados_cadastrais_telegram
+                    st = processar_dados_cadastrais_telegram(
+                        arquivo=arquivo, db_path=db_path, mover_para_processados=False
+                    )
+                    if st.get('processados', 0) > 0:
+                        stats.setdefault('telegram', 0)
+                        stats['telegram'] += 1
+                        logger.info(
+                            f"  ✓ Telegram processado: {st.get('inseridos', 0)} inseridos, "
+                            f"{st.get('atualizados', 0)} atualizados"
+                        )
+                except Exception as e:
+                    logger.error(f"  Erro Telegram: {e}")
+                    stats['erros'] += 1
                 _mover_para_processados(arquivo)
 
             else:
@@ -1475,6 +1516,11 @@ Exemplos:
         help='Pula o reprocessamento de endereços (ETAPA 5)'
     )
     parser.add_argument(
+        '--skip-auditoria',
+        action='store_true',
+        help='Pula a auditoria de vendas TIM Pré/Controle (ETAPA 2b)'
+    )
+    parser.add_argument(
         '--forcar-legado',
         action='store_true',
         help='Forçar geração de homologação a partir do banco legado'
@@ -1513,7 +1559,7 @@ Exemplos:
             _workers = max(1, int(getattr(args, 'workers', 1) or 1))
             reprocessador = ReprocessadorEndereco(
                 db_v2_path=db_v2_path,
-                periodo_dias=180,
+                periodo_dias=90,
                 diretorio_saida=str(PASTA_SAIDA),
                 config_proxies=_proxy_cfg,
                 workers=_workers,
@@ -1560,11 +1606,28 @@ Exemplos:
         'excel_gross': {},
         'csv': {},
         'objetos': {},
-        'homologacao': {}
+        'homologacao': {},
+        'auditoria': {},
     }
     
     # Processar bases (se não for apenas homologação)
     # ORDEM OBRIGATÓRIA: atualizar portabilidade.db ANTES de gerar homologação
+
+    # ETAPA 0: Sincronizar bot_processamento da Oracle Cloud
+    logger.info("")
+    logger.info(">>> ETAPA 0: Sincronizar Bot Processamento (Oracle Cloud → Local)")
+    try:
+        from sincronizar_bot_oracle import sincronizar_bot_oracle
+        stats_oracle = sincronizar_bot_oracle(local_db_path=db_v2_path)
+        _oracle_novos = stats_oracle.get("novos_inseridos", 0)
+        _oracle_total = stats_oracle.get("total_oracle", 0)
+        if _oracle_novos > 0:
+            logger.info("  ✓ Oracle sync: %d novos de %d total", _oracle_novos, _oracle_total)
+        else:
+            logger.info("  ✓ Oracle sync: nenhum registro novo (total oracle: %d)", _oracle_total)
+    except Exception as e:
+        logger.warning("  ⚠ Erro ao sincronizar Oracle: %s", e)
+
     if not args.apenas_homologacao:
 
         # ETAPA 1: BS_VENDA_DU (coleta e atualização — independente da COVERTE)
@@ -1630,6 +1693,19 @@ Exemplos:
         }
         stats_geral['objetos'] = {'sucesso': stats_unificado.get('excel_objetos', 0) > 0}
 
+        # Atualizar contadores V2 para finalização da execução
+        registros_v2_processados = (
+            stats_unificado.get('csv_processados', 0)
+            + stats_unificado.get('excel_coverte', 0)
+            + stats_unificado.get('excel_gross', 0)
+            + stats_unificado.get('excel_objetos', 0)
+            + stats_unificado.get('tim_pre_controle', 0)
+            + stats_unificado.get('relatorio_faturamento', 0)
+            + stats_unificado.get('estornos', 0)
+            + stats_unificado.get('auditoria_rpa_inseridos', 0)
+        )
+        registros_v2_erros = stats_unificado.get('erros', 0)
+
         # Verificação de integridade e contagens pós Etapa 2 (DBA/MIS)
         integridade2 = verificar_integridade_banco(db_path)
         if integridade2.get('ok'):
@@ -1659,6 +1735,41 @@ Exemplos:
                     conn.commit()
             except Exception:
                 pass
+
+        # ETAPA 2b: Auditoria de vendas TIM Pré/Controle (EVA + Cruzamento)
+        if db_manager_v2 and not getattr(args, 'skip_auditoria', False):
+            logger.info("")
+            logger.info(">>> ETAPA 2b: Auditoria de vendas TIM Pré/Controle (EVA + Cruzamento)")
+            if exec_id_v2:
+                try:
+                    with db_manager_v2._get_connection() as conn:
+                        conn.execute(
+                            "UPDATE execucoes_processamento SET etapa_atual = ? WHERE id = ?",
+                            ('auditoria_vendas_tim', exec_id_v2)
+                        )
+                        conn.commit()
+                except Exception:
+                    pass
+            try:
+                from src.pipeline_auditoria.pipeline import PipelineAuditoria
+                pipeline_auditoria = PipelineAuditoria(db_manager_v2)
+
+                # RPA já processado na ETAPA 2 (inline), aqui só EVA + cruzamento
+                stats_auditoria = pipeline_auditoria.executar(arquivos_rpa=[])
+                stats_geral['auditoria'] = stats_auditoria
+
+                _eva_ins = stats_auditoria.get('eva', {}).get('inseridos', 0)
+                _cruz = stats_auditoria.get('cruzamento', {})
+                _cruz_total = _cruz.get('total', 0)
+                _cruz_match = _cruz.get('com_match', 0)
+
+                logger.info(
+                    "  ✓ Auditoria: EVA=%d, Cruzamento=%d (match=%d)",
+                    _eva_ins, _cruz_total, _cruz_match,
+                )
+            except Exception as e:
+                logger.warning(f"  ⚠ Erro na auditoria de vendas: {e}")
+                stats_geral['auditoria'] = {}
 
     # ETAPA 3b: Atualizar Cache Unificada no Banco V2
     # BUG 4 FIX: Também atualizar cache quando --apenas-homologacao para garantir dados frescos
@@ -1691,7 +1802,88 @@ Exemplos:
                     conn.commit()
             except Exception:
                 pass
-        
+
+    # ETAPA 3c: Resolver registros pendentes (proposta_isize não resolvido)
+    # Após todas as bases importadas + cache reconstruído, tenta resolver pendências
+    if db_manager_v2 and not args.apenas_homologacao:
+        logger.info("")
+        logger.info(">>> ETAPA 3c: Resolver registros pendentes (proposta_isize)")
+        if exec_id_v2:
+            try:
+                with db_manager_v2._get_connection() as conn:
+                    conn.execute(
+                        "UPDATE execucoes_processamento SET etapa_atual = ? WHERE id = ?",
+                        ('resolver_pendentes', exec_id_v2)
+                    )
+                    conn.commit()
+            except Exception:
+                pass
+        try:
+            from corrigir_id_proposta_isize import corrigir_id_proposta_isize
+            stats_correcao = corrigir_id_proposta_isize(db_path=db_path, dry_run=False)
+            _corrigidos = stats_correcao.get('corrigidos', 0)
+            _nao_encontrados = stats_correcao.get('nao_encontrados', 0)
+            _erros_correcao = stats_correcao.get('erros', 0)
+            logger.info(
+                "  ✓ Pendentes: corrigidos=%d, não resolvidos=%d, erros=%d",
+                _corrigidos, _nao_encontrados, _erros_correcao,
+            )
+            # Se houve correções, reconstruir cache para refletir dados corrigidos
+            if _corrigidos > 0:
+                logger.info("  ↻ Reconstruindo cache após correções...")
+                try:
+                    from src.database.data_unifier import DataUnifier
+                    import time as _time
+                    _rc_inicio = _time.time()
+                    unifier = DataUnifier(db_manager_v2)
+                    resultado_rc = unifier.reconstruir_cache_completo()
+                    _rc_tempo = round(_time.time() - _rc_inicio, 2)
+                    logger.info(
+                        "  ✓ Cache reconstruído: %d inseridos, %d erros, %.2fs",
+                        resultado_rc.get('inseridos', 0),
+                        resultado_rc.get('erros', 0),
+                        _rc_tempo,
+                    )
+                except Exception as e:
+                    logger.warning("  ⚠ Erro ao reconstruir cache pós-correção: %s", e)
+        except Exception as e:
+            logger.warning("  ⚠ Erro ao resolver pendentes: %s", e)
+
+        # ETAPA 3d: Reprocessar pendentes GROSS/TIM (telefone com decimal)
+        logger.info("")
+        logger.info(">>> ETAPA 3d: Reprocessar pendentes GROSS/TIM (normalização telefone)")
+        try:
+            from src.database.importador import Importador
+            _imp_repro = Importador()
+            _stats_repro = _imp_repro.reprocessar_pendentes_gross(db_manager_v2)
+            _resolvidos = _stats_repro.get('resolvidos', 0)
+            _falhas_repro = _stats_repro.get('falhas', 0)
+            _total_repro = _stats_repro.get('total', 0)
+            logger.info(
+                "  ✓ Pendentes GROSS/TIM: resolvidos=%d, falhas=%d, total=%d",
+                _resolvidos, _falhas_repro, _total_repro,
+            )
+            # Se houve resoluções, reconstruir cache
+            if _resolvidos > 0:
+                logger.info("  ↻ Reconstruindo cache após resolução de pendentes GROSS...")
+                try:
+                    from src.database.data_unifier import DataUnifier
+                    import time as _time
+                    _rg_inicio = _time.time()
+                    unifier = DataUnifier(db_manager_v2)
+                    resultado_rg = unifier.reconstruir_cache_completo()
+                    _rg_tempo = round(_time.time() - _rg_inicio, 2)
+                    logger.info(
+                        "  ✓ Cache reconstruído: %d inseridos, %d erros, %.2fs",
+                        resultado_rg.get('inseridos', 0),
+                        resultado_rg.get('erros', 0),
+                        _rg_tempo,
+                    )
+                except Exception as e:
+                    logger.warning("  ⚠ Erro ao reconstruir cache pós-GROSS: %s", e)
+        except Exception as e:
+            logger.warning("  ⚠ Erro ao reprocessar pendentes GROSS/TIM: %s", e)
+
     # Gerar arquivos de homologação (se não for apenas bases)
     if not args.apenas_bases:
         _v2_ativo = usar_v2(db_manager_v2, args)
@@ -1735,7 +1927,7 @@ Exemplos:
             _proxy_cfg = PROXY_FILE if Path(PROXY_FILE).exists() else None
             reprocessador = ReprocessadorEndereco(
                 db_v2_path=db_v2_path,
-                periodo_dias=180,
+                periodo_dias=90,
                 diretorio_saida=str(PASTA_SAIDA),
                 config_proxies=_proxy_cfg,
                 workers=_reproc_workers,
@@ -1805,6 +1997,20 @@ Exemplos:
             fat_stats = _su.get('relatorio_faturamento', 0)
             if fat_stats > 0:
                 print(f"  ✅ Relatorio Faturamento: {fat_stats} arquivo(s) → relatorio_faturamento")
+
+        # Auditoria de vendas TIM Pré/Controle
+        if not getattr(args, 'skip_auditoria', False):
+            _aud = stats_geral.get('auditoria', {})
+            _aud_rpa_inline = locals().get('stats_unificado', {}).get('auditoria_rpa_inseridos', 0)
+            if _aud or _aud_rpa_inline:
+                _aud_eva = _aud.get('eva', {}).get('inseridos', 0)
+                _aud_cruz = _aud.get('cruzamento', {})
+                _aud_total = _aud_cruz.get('total', 0)
+                _aud_match = _aud_cruz.get('com_match', 0)
+                print(f"  ✅ Auditoria TIM Pré/Ctrl: EVA={_aud_eva}, RPA={_aud_rpa_inline}, "
+                      f"Cruzamento={_aud_total} (match={_aud_match})")
+            else:
+                print(f"  ⚠️ Auditoria TIM Pré/Ctrl: Não executada")
     
     if not args.apenas_bases:
         print("\n📄 ARQUIVOS DE HOMOLOGAÇÃO:")

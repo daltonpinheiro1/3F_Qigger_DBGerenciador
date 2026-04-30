@@ -130,9 +130,11 @@ class QueriesV2:
         """
         Busca registros para homologação WPP.
 
-        Usa vw_base_unificada + vw_decisoes_corrente.
-        Retorna registros com ação_a_realizar preenchida, dentro do
+        Usa views correntes do V2 diretamente via vw_base_unificada
+        (VIEW que faz JOINs de todas as views correntes).
+        Retorna todos os registros de portabilidade dentro do
         limite de dias, com os campos que gerar_homologacao_wpp.py espera.
+        Sem filtro de regra de decisão — parametrização feita no gerador.
 
         Args:
             dias_limite: Número de dias para trás a considerar.
@@ -205,9 +207,7 @@ class QueriesV2:
                     ON p.proposta_isize = bu.proposta_isize
                 LEFT JOIN vw_clientes_corrente c
                     ON c.cpf = bu.cpf
-                WHERE bu.acao_a_realizar IS NOT NULL
-                  AND bu.acao_a_realizar != ''
-                  AND (
+                WHERE (
                       p.data_venda IS NULL
                       OR p.data_venda >= :data_limite
                   )

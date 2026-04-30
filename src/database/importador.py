@@ -529,6 +529,213 @@ class Importador:
         logger.warning("Registro pendente criado para CPF: %s", valor_original)
 
     # ====================================================================
+    # Reprocessar registros pendentes (GROSS/TIM com telefone decimal)
+    # ====================================================================
+
+    def reprocessar_pendentes_gross(self, db_manager) -> Dict[str, int]:
+        """
+        Reprocessa registros pendentes tentando resolver proposta_isize
+        com a normalização de telefone corrigida.
+
+        Busca registros em registros_pendentes com tipo_pendencia =
+        'proposta_isize_pendente' e tenta resolver usando o telefone
+        normalizado (sem decimais do Excel).
+
+        Returns:
+            Dict com {resolvidos, falhas, total}.
+        """
+        stats = {'resolvidos': 0, 'falhas': 0, 'total': 0}
+
+        with db_manager._get_connection() as conn:
+            cursor = conn.cursor()
+            # Filtrar apenas pendentes GROSS/TIM (que têm ACESSO ou CLASSIFICACAO_CR)
+            cursor.execute(
+                "SELECT id, dados_json, chave_original, lote_importacao_id "
+                "FROM registros_pendentes "
+                "WHERE tipo_pendencia = 'proposta_isize_pendente' "
+                "  AND resolvido = 0 "
+                "  AND (dados_json LIKE '%CLASSIFICACAO_CR%' "
+                "       OR dados_json LIKE '%DATA_SOLICITACAO%')"
+            )
+            pendentes = cursor.fetchall()
+
+        stats['total'] = len(pendentes)
+        if not pendentes:
+            logger.info("Nenhum registro pendente para reprocessar")
+            return stats
+
+        logger.info(
+            "Reprocessando %d registros pendentes...", len(pendentes)
+        )
+
+        for row in pendentes:
+            pend_id = row[0]
+            dados_json = row[1]
+            chave_original = row[2] or ''
+            lote_id = row[3]
+
+            try:
+                dados = json.loads(dados_json)
+            except (json.JSONDecodeError, TypeError):
+                stats['falhas'] += 1
+                continue
+
+            # Normalizar telefone
+            acesso_raw = dados.get('ACESSO', chave_original)
+            acesso = self._normalizar_telefone_gross(acesso_raw)
+
+            proposta_isize = None
+
+            if acesso:
+                with db_manager._get_connection() as conn:
+                    cursor = conn.cursor()
+
+                    # 1. portabilidade
+                    cursor.execute(
+                        "SELECT proposta_isize FROM portabilidade "
+                        "WHERE telefone_portabilidade = ? "
+                        "ORDER BY versao DESC LIMIT 1",
+                        (acesso,),
+                    )
+                    r = cursor.fetchone()
+                    if r and r[0]:
+                        proposta_isize = str(r[0])
+
+                    # 2. consulta_siebel
+                    if not proposta_isize:
+                        cursor.execute(
+                            "SELECT proposta_isize FROM consulta_siebel "
+                            "WHERE REPLACE(REPLACE(REPLACE("
+                            "  COALESCE(numero_acesso, ''), '-', ''), "
+                            "  ' ', ''), '(', '') = ? "
+                            "ORDER BY versao DESC LIMIT 1",
+                            (acesso,),
+                        )
+                        r = cursor.fetchone()
+                        if r and r[0]:
+                            proposta_isize = str(r[0])
+
+                    # 3. clientes via ddd + telefone
+                    if not proposta_isize and len(acesso) >= 10:
+                        ddd = acesso[:2]
+                        tel = acesso[2:]
+                        cursor.execute(
+                            "SELECT c.cpf FROM clientes c "
+                            "WHERE c.ddd_1 = ? AND c.telefone_1 = ? "
+                            "ORDER BY c.versao DESC LIMIT 1",
+                            (ddd, tel),
+                        )
+                        r = cursor.fetchone()
+                        if r and r[0]:
+                            cursor.execute(
+                                "SELECT proposta_isize FROM propostas "
+                                "WHERE cpf = ? "
+                                "ORDER BY versao DESC LIMIT 1",
+                                (str(r[0]),),
+                            )
+                            r2 = cursor.fetchone()
+                            if r2 and r2[0]:
+                                proposta_isize = str(r2[0])
+
+            # Tentar CUSTCODE
+            if not proposta_isize:
+                custcode = dados.get('CUSTCODE', '')
+                if custcode and self.validar_proposta_isize(custcode):
+                    proposta_isize = custcode
+
+            if proposta_isize or acesso:
+                # Determinar tabela destino pelo conteúdo
+                has_classificacao = 'CLASSIFICACAO_CR' in dados
+                has_data_sol = 'DATA_SOLICITACAO' in dados
+
+                try:
+                    if has_classificacao and not has_data_sol:
+                        # GROSS — aceita proposta_isize=None se tem acesso
+                        db_manager.inserir_registro('gross', {
+                            'proposta_isize': proposta_isize,
+                            'acesso': acesso,
+                            'ddd': dados.get('DDD'),
+                            'custcode': dados.get('CUSTCODE'),
+                            'operadora_n1': dados.get('OPERADORA_N1'),
+                            'classificacao_cr': dados.get('CLASSIFICACAO_CR'),
+                            'data_gross': dados.get('DATA') or dados.get('DATA_GROSS'),
+                            'nome_pdv': dados.get('NOME_PDV'),
+                            'mes': dados.get('MES'),
+                        }, lote_id)
+                    elif has_data_sol:
+                        # portabilidade_tim
+                        cpf_cnpj = self.normalizar_cpf(
+                            dados.get('CPF_CNPJ', '')
+                        )
+                        db_manager.inserir_registro('portabilidade_tim', {
+                            'proposta_isize': proposta_isize,
+                            'acesso': acesso,
+                            'acesso_temporario': dados.get('ACESSO_TEMPORARIO'),
+                            'ddd': dados.get('DDD'),
+                            'data_solicitacao': dados.get('DATA_SOLICITACAO'),
+                            'mes_solicitacao': dados.get('MES_SOLICITACAO'),
+                            'data_ativacao': dados.get('DATA_ATIVACAO'),
+                            'mes_ativacao': dados.get('MES_ATIVACAO'),
+                            'data_conclusao': dados.get('DATA_CONCLUSAO'),
+                            'sky_contrato': dados.get('SKY_CONTRATO'),
+                            'sky_cliente': dados.get('SKY_CLIENTE'),
+                            'protocolo': dados.get('PROTOCOLO'),
+                            'operadora_n1': dados.get('OPERADORA_N1'),
+                            'tipo_pre_pos_controle': dados.get('TIPO_PRE_POS_CONTROLE'),
+                            'tecnologia': dados.get('TECNOLOGIA'),
+                            'voz_dados': dados.get('VOZ_DADOS'),
+                            'doadora': dados.get('DOADORA'),
+                            'receptora': dados.get('RECEPTORA'),
+                            'tipo': dados.get('TIPO'),
+                            'status': dados.get('STATUS'),
+                            'custcode': dados.get('CUSTCODE'),
+                            'cpf_cnpj': cpf_cnpj or dados.get('CPF_CNPJ'),
+                            'portabilidade': dados.get('PORTABILIDADE'),
+                            'motivo_conflito': dados.get('MOTIVO_CONFLITO'),
+                            'motivo_cancelamento': dados.get('MOTIVO_CANCELAMENTO'),
+                        }, lote_id)
+
+                    # Marcar como resolvido
+                    with db_manager._get_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE registros_pendentes "
+                            "SET resolvido = 1, "
+                            "    proposta_isize_resolvido = ?, "
+                            "    resolvido_em = CURRENT_TIMESTAMP, "
+                            "    tentativas_resolucao = tentativas_resolucao + 1 "
+                            "WHERE id = ?",
+                            (proposta_isize, pend_id),
+                        )
+                        conn.commit()
+                    stats['resolvidos'] += 1
+
+                except Exception as e:
+                    logger.warning(
+                        "Erro ao inserir pendente resolvido %d: %s",
+                        pend_id, e,
+                    )
+                    stats['falhas'] += 1
+            else:
+                # Incrementar tentativas
+                with db_manager._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE registros_pendentes "
+                        "SET tentativas_resolucao = tentativas_resolucao + 1 "
+                        "WHERE id = ?",
+                        (pend_id,),
+                    )
+                    conn.commit()
+                stats['falhas'] += 1
+
+        logger.info(
+            "Reprocessamento concluído: %d resolvidos, %d falhas de %d total",
+            stats['resolvidos'], stats['falhas'], stats['total'],
+        )
+        return stats
+
+    # ====================================================================
     # Importação principal (Task 5.1)
     # ====================================================================
 
@@ -745,8 +952,12 @@ class Importador:
         # 4. portabilidade
         db_manager.inserir_registro('portabilidade', {
             'proposta_isize': proposta_isize,
-            'telefone_portabilidade': lv(row.get('Telefone Portabilidade')),
-            'numero_linha': lv(row.get('Numero linha')),
+            'telefone_portabilidade': self._normalizar_telefone_gross(
+                lv(row.get('Telefone Portabilidade'))
+            ),
+            'numero_linha': self._normalizar_telefone_gross(
+                lv(row.get('Numero linha'))
+            ),
             'portabilidade_status': lv(row.get('Portabilidade')),
             'complemento_portabilidade': lv(row.get('Complemento Portabilidade')),
             'portabilidade_antecipada': lv(row.get('Portabilidade Antecipada')),
@@ -809,7 +1020,8 @@ class Importador:
             db_manager: Instância do DatabaseManagerV2.
         """
         lv = self._limpar_valor
-        acesso = lv(row.get('ACESSO'))
+        acesso_raw = lv(row.get('ACESSO'))
+        acesso = self._normalizar_telefone_gross(acesso_raw)
 
         # Resolver proposta_isize via CPF_CNPJ (TIM não tem proposta_isize direto)
         cpf_cnpj = self.normalizar_cpf(row.get('CPF_CNPJ', ''))
@@ -822,13 +1034,30 @@ class Importador:
             if acesso:
                 with db_manager._get_connection() as conn:
                     cursor = conn.cursor()
+                    # 1. portabilidade.telefone_portabilidade
                     cursor.execute(
-                        "SELECT proposta_isize FROM portabilidade WHERE telefone_portabilidade = ? ORDER BY versao DESC LIMIT 1",
+                        "SELECT proposta_isize FROM portabilidade "
+                        "WHERE telefone_portabilidade = ? "
+                        "ORDER BY versao DESC LIMIT 1",
                         (acesso,),
                     )
                     r = cursor.fetchone()
                     if r and r[0]:
                         proposta_isize = str(r[0])
+
+                    # 2. consulta_siebel.numero_acesso
+                    if not proposta_isize:
+                        cursor.execute(
+                            "SELECT proposta_isize FROM consulta_siebel "
+                            "WHERE REPLACE(REPLACE(REPLACE("
+                            "  COALESCE(numero_acesso, ''), '-', ''), "
+                            "  ' ', ''), '(', '') = ? "
+                            "ORDER BY versao DESC LIMIT 1",
+                            (acesso,),
+                        )
+                        r = cursor.fetchone()
+                        if r and r[0]:
+                            proposta_isize = str(r[0])
 
         if not proposta_isize:
             self._registrar_pendencia(db_manager, row, 'ACESSO', acesso or '', lote_id)
@@ -881,9 +1110,49 @@ class Importador:
     # Mapeamento GROSS → gross
     # ====================================================================
 
+    @staticmethod
+    def _normalizar_telefone_gross(valor: Optional[str]) -> Optional[str]:
+        """
+        Normaliza telefone vindo de arquivo GROSS.
+
+        O Excel frequentemente converte números longos para notação
+        científica ou adiciona decimais (ex: '33999979695.00001').
+        Este método extrai apenas os dígitos inteiros.
+
+        Args:
+            valor: Valor bruto do campo ACESSO.
+
+        Returns:
+            String com apenas dígitos (telefone limpo) ou None.
+        """
+        if valor is None:
+            return None
+        s = str(valor).strip()
+        if s == '' or s.lower() in ('nan', 'none', 'nat'):
+            return None
+        # Remover parte decimal (Excel converte telefone para float)
+        if '.' in s:
+            s = s.split('.')[0]
+        # Remover notação científica: converter via float→int
+        if 'e' in s.lower() or 'E' in s:
+            try:
+                s = str(int(float(s)))
+            except (ValueError, OverflowError):
+                pass
+        # Manter apenas dígitos
+        digits = re.sub(r'[^0-9]', '', s)
+        return digits if digits else None
+
     def _mapear_gross(self, row: pd.Series, lote_id: int, db_manager):
         """
         Mapeia uma linha do arquivo GROSS para a tabela gross.
+
+        Resolução de proposta_isize (em ordem de prioridade):
+        1. ACESSO (telefone) → portabilidade.telefone_portabilidade
+        2. ACESSO (telefone) → consulta_siebel.numero_acesso
+        3. ACESSO (telefone) → clientes.telefone_1 (com ddd)
+        4. CUSTCODE → propostas.proposta_isize (se parece proposta)
+        5. PROTOCOLO → consulta_siebel (busca por protocolo)
 
         Args:
             row: Linha do DataFrame.
@@ -891,24 +1160,113 @@ class Importador:
             db_manager: Instância do DatabaseManagerV2.
         """
         lv = self._limpar_valor
-        acesso = lv(row.get('ACESSO'))
+        acesso_raw = lv(row.get('ACESSO'))
+        acesso = self._normalizar_telefone_gross(acesso_raw)
 
-        # GROSS não tem proposta_isize direto — resolver por acesso (telefone)
         proposta_isize = None
+
         if acesso:
             with db_manager._get_connection() as conn:
                 cursor = conn.cursor()
+
+                # 1. Buscar em portabilidade.telefone_portabilidade
                 cursor.execute(
-                    "SELECT proposta_isize FROM portabilidade WHERE telefone_portabilidade = ? ORDER BY versao DESC LIMIT 1",
+                    "SELECT proposta_isize FROM portabilidade "
+                    "WHERE telefone_portabilidade = ? "
+                    "ORDER BY versao DESC LIMIT 1",
                     (acesso,),
                 )
                 r = cursor.fetchone()
                 if r and r[0]:
                     proposta_isize = str(r[0])
 
+                # 1b. Buscar em portabilidade.numero_linha (nova linha)
+                if not proposta_isize:
+                    cursor.execute(
+                        "SELECT proposta_isize FROM portabilidade "
+                        "WHERE numero_linha = ? "
+                        "ORDER BY versao DESC LIMIT 1",
+                        (acesso,),
+                    )
+                    r = cursor.fetchone()
+                    if r and r[0]:
+                        proposta_isize = str(r[0])
+
+                # 2. Buscar em consulta_siebel.numero_acesso
+                if not proposta_isize:
+                    cursor.execute(
+                        "SELECT proposta_isize FROM consulta_siebel "
+                        "WHERE REPLACE(REPLACE(REPLACE("
+                        "  COALESCE(numero_acesso, ''), '-', ''), "
+                        "  ' ', ''), '(', '') = ? "
+                        "ORDER BY versao DESC LIMIT 1",
+                        (acesso,),
+                    )
+                    r = cursor.fetchone()
+                    if r and r[0]:
+                        proposta_isize = str(r[0])
+
+                # 3. Buscar em clientes via ddd + telefone_1
+                if not proposta_isize and len(acesso) >= 10:
+                    ddd = acesso[:2]
+                    tel = acesso[2:]
+                    cursor.execute(
+                        "SELECT c.cpf FROM clientes c "
+                        "WHERE c.ddd_1 = ? AND c.telefone_1 = ? "
+                        "ORDER BY c.versao DESC LIMIT 1",
+                        (ddd, tel),
+                    )
+                    r = cursor.fetchone()
+                    if r and r[0]:
+                        cpf = str(r[0])
+                        cursor.execute(
+                            "SELECT proposta_isize FROM propostas "
+                            "WHERE cpf = ? "
+                            "ORDER BY versao DESC LIMIT 1",
+                            (cpf,),
+                        )
+                        r2 = cursor.fetchone()
+                        if r2 and r2[0]:
+                            proposta_isize = str(r2[0])
+
+        # 4. Tentar CUSTCODE como proposta_isize
         if not proposta_isize:
-            self._registrar_pendencia(db_manager, row, 'ACESSO', acesso or '', lote_id)
-            raise ValueError(f"proposta_isize não resolvido para GROSS (acesso={acesso})")
+            custcode = lv(row.get('CUSTCODE'))
+            if custcode and self.validar_proposta_isize(custcode):
+                proposta_isize = custcode
+
+        # 5. Tentar PROTOCOLO → consulta_siebel
+        if not proposta_isize:
+            protocolo = lv(row.get('PROTOCOLO'))
+            if protocolo:
+                protocolo_limpo = re.sub(r'[^0-9]', '', str(protocolo))
+                if protocolo_limpo:
+                    with db_manager._get_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT proposta_isize FROM consulta_siebel "
+                            "WHERE numero_bilhete = ? OR ultimo_bilhete = ? "
+                            "ORDER BY versao DESC LIMIT 1",
+                            (protocolo_limpo, protocolo_limpo),
+                        )
+                        r = cursor.fetchone()
+                        if r and r[0]:
+                            proposta_isize = str(r[0])
+
+        if not proposta_isize:
+            # GROSS pode não ter proposta_isize — inserir com acesso como chave
+            if acesso:
+                logger.debug(
+                    "GROSS sem proposta_isize, inserindo com acesso=%s",
+                    acesso,
+                )
+            else:
+                self._registrar_pendencia(
+                    db_manager, row, 'ACESSO', acesso or '', lote_id
+                )
+                raise ValueError(
+                    "GROSS sem proposta_isize e sem acesso"
+                )
 
         db_manager.inserir_registro('gross', {
             'proposta_isize': proposta_isize,
@@ -917,7 +1275,7 @@ class Importador:
             'custcode': lv(row.get('CUSTCODE')),
             'operadora_n1': lv(row.get('OPERADORA_N1')),
             'classificacao_cr': lv(row.get('CLASSIFICACAO_CR')),
-            'data_gross': lv(row.get('DATA_GROSS')),
+            'data_gross': lv(row.get('DATA')) or lv(row.get('DATA_GROSS')),
             'nome_pdv': lv(row.get('NOME_PDV')),
             'mes': lv(row.get('MES')),
         }, lote_id)
@@ -1100,7 +1458,9 @@ class Importador:
 
         db_manager.inserir_registro('resultado_gross', {
             'proposta_isize': proposta_isize,
-            'numero_acesso': lv(row.get('Numero Acesso')),
+            'numero_acesso': self._normalizar_telefone_gross(
+                lv(row.get('Numero Acesso'))
+            ),
             'data_gross': lv(row.get('Data gross')),
             'cpf': cpf or None,
             'iccid': lv(row.get('ICCID')),
@@ -1140,8 +1500,12 @@ class Importador:
             'plano_ativado': lv(row.get('PLANO_ATIVADO')),
             'plano_fidelizado': lv(row.get('PLANO_FIDELIZADO')),
             'portabilidade': lv(row.get('PORTABILIDADE')),
-            'numero_provisorio': lv(row.get('NUMERO_PROVISORIO')),
-            'numero_portado': lv(row.get('NUMERO_PORTADO')),
+            'numero_provisorio': self._normalizar_telefone_gross(
+                lv(row.get('NUMERO_PROVISORIO'))
+            ),
+            'numero_portado': self._normalizar_telefone_gross(
+                lv(row.get('NUMERO_PORTADO'))
+            ),
             'cpf': cpf or None,
             'nome_cliente': lv(row.get('NOME_CLIENTE')),
             'endereco': lv(row.get('ENDERECO')),
@@ -1191,7 +1555,9 @@ class Importador:
         db_manager.inserir_registro('consulta_siebel', {
             'proposta_isize': proposta_isize,
             'cpf': cpf or None,
-            'numero_acesso': lv(row.get('Número de acesso')),
+            'numero_acesso': self._normalizar_telefone_gross(
+                lv(row.get('Número de acesso'))
+            ),
             'numero_ordem': lv(row.get('Número da ordem')),
             'codigo_externo': lv(row.get('Código externo')),
             'numero_temporario': lv(row.get('Número temporário')),

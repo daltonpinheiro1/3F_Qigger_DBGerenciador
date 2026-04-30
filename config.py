@@ -101,6 +101,31 @@ OUTPUT_REABERTURA = DATA_DIR / "homologacao_reabertura.csv"
 # WPP Output (Régua de Comunicação)
 WPP_OUTPUT_PATH = DATA_DIR / "WPP_Regua_Output.csv"
 
+# ========== CONFIGURAÇÃO EVA (SQL Server) ==========
+
+EVA_SERVER = os.getenv("EVA_SERVER", "3fdb.vexten.com.br")
+EVA_DATABASE = os.getenv("EVA_DATABASE", "eva_activities")
+EVA_USER = os.getenv("EVA_USER", "mis")
+EVA_PASSWORD = os.getenv("EVA_PASSWORD", "")
+EVA_VIEW = "eva_activities.dbo.vwSales"
+
+# Tabela de parametrização de status (lista ordenada — primeira regra vence)
+PARAMETRIZACAO_STATUS = [
+    {"padrao": "O plano: TIM Controle", "status": "CLIENTE JÁ MIGRADO"},
+    {"padrao": "Score insuficiente, score:", "status": "LIMITE DE CREDITO"},
+    {"padrao": "[Sistema] Não foi possível processar esse registro.", "status": "FALHA PROCESSAMENTO"},
+    {"padrao": "Existe uma ordem Em aprovisionamento", "status": "ORDEM EM PROCESSAMENTO"},
+    {"padrao": "Perfil Pré-Pago. Cliente com pendência financeira na TIM", "status": "PENDENCIA FINANCEIRA"},
+    {"padrao": "Perfil Pré-Pago. Cliente com restrição de administrativa na TIM", "status": "RESTRICAO INTERNA"},
+    {"padrao": "O numero de acesso se encontra Cancelado.", "status": "LINHA INATIVA"},
+    {"padrao": "Cliente não possui nenhum Billing Profile com endereço correspondente ao DDD selecionado", "status": "DDD FORA DO ESTADO"},
+    {"padrao": "Endereço divergente", "status": "DIVERGENCIA ENDERECO"},
+    {"padrao": "Erro ao executar o sub-processo 'TIM Criar Cliente WF'", "status": "FALHA PROCESSAMENTO"},
+    {"padrao": "CEP não encontrado", "status": "DIVERGENCIA ENDERECO"},
+    {"padrao": "Erro de comunicação com o Crivo", "status": "FALHA PROCESSAMENTO"},
+    {"padrao": "Nome da mãe deve conter apenas letras", "status": "DADOS CADASTRAIS INVALIDOS"},
+]
+
 # ========== CONFIGURAÇÕES DE PROCESSAMENTO ==========
 
 # Deletar arquivo após processar? (True = deletar, False = manter)
