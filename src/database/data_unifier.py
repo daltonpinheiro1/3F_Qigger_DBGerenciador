@@ -188,24 +188,50 @@ class DataUnifier:
                     INSERT OR REPLACE INTO cache_base_unificada (
                         proposta_isize, cpf, nome_cliente, telefone_portabilidade,
                         numero_linha, numero_ordem, data_venda, produto, plano,
-                        status_venda, portabilidade_status, status_tim,
-                        data_ativacao_tim, status_logistica, rastreio, data_entrega,
+                        forma_pagamento, nome_equipe, nome_vendedor,
+                        data_nascimento, endereco, endereco_numero, complemento,
+                        bairro, cidade_cliente, uf_cliente, cep_cliente,
+                        ddd_1, telefone_1, email, score,
+                        status_venda, motivo_rejeicao_cancelamento,
+                        conectada, data_conectada,
+                        portabilidade_status, complemento_portabilidade,
+                        status_tim, data_ativacao_tim, acesso_tim,
+                        status_logistica, rastreio_logistica, data_entrega,
+                        nu_pedido, transportadora, previsao_entrega,
                         data_gross, classificacao_cr, resultado_gross,
-                        status_pedido, detalhe_status, status_bilhete, status_ordem,
-                        bluechip_status, pedido_bluechip, regra_id,
-                        acao_a_realizar, tipo_mensagem, atualizado_em
+                        status_pedido, detalhe_status, data_atualizacao_status,
+                        numero_acesso, codigo_externo,
+                        status_bilhete, operadora_doadora, data_portabilidade,
+                        motivo_recusa, motivo_cancelamento,
+                        status_ordem, novo_status_bilhete,
+                        bluechip_status, pedido_bluechip,
+                        remessa_bluechip, data_maxima_prevista_entrega,
+                        regra_id, decisao, acao_a_realizar, tipo_mensagem,
+                        atualizado_em
                     )
                     SELECT
                         proposta_isize, cpf, nome_cliente, telefone_portabilidade,
                         numero_linha, numero_ordem, data_venda, produto, plano,
-                        status_venda, portabilidade_status, status_tim,
-                        data_ativacao_tim, status_logistica,
-                        rastreio_logistica,
-                        data_entrega,
+                        forma_pagamento, nome_equipe, nome_vendedor,
+                        data_nascimento, endereco, endereco_numero, complemento,
+                        bairro, cidade_cliente, uf_cliente, cep_cliente,
+                        ddd_1, telefone_1, email, score,
+                        status_venda, motivo_rejeicao_cancelamento,
+                        conectada, data_conectada,
+                        portabilidade_status, complemento_portabilidade,
+                        status_tim, data_ativacao_tim, acesso_tim,
+                        status_logistica, rastreio_logistica, data_entrega,
+                        nu_pedido, transportadora, previsao_entrega,
                         data_gross, classificacao_cr, resultado_gross,
-                        status_pedido, detalhe_status, status_bilhete, status_ordem,
-                        bluechip_status, pedido_bluechip, regra_id,
-                        acao_a_realizar, tipo_mensagem, CURRENT_TIMESTAMP
+                        status_pedido, detalhe_status, data_atualizacao_status,
+                        numero_acesso, codigo_externo,
+                        status_bilhete, operadora_doadora, data_portabilidade,
+                        motivo_recusa, motivo_cancelamento,
+                        status_ordem, novo_status_bilhete,
+                        bluechip_status, pedido_bluechip,
+                        remessa_bluechip, data_maxima_prevista_entrega,
+                        regra_id, decisao, acao_a_realizar, tipo_mensagem,
+                        CURRENT_TIMESTAMP
                     FROM vw_base_unificada
                     GROUP BY proposta_isize
                 """)
@@ -242,4 +268,107 @@ class DataUnifier:
             "Reconstrução do cache concluída: inseridos=%d, erros=%d",
             inseridos, erros,
         )
+
+        # Passo extra: atualizar data_gross/classificacao_cr via acesso (telefone)
+        # A vw_base_unificada faz JOIN por proposta_isize, mas muitos GROSS
+        # não têm proposta correspondente. Atualizar via múltiplas estratégias.
+        try:
+            with self.db_v2._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # 1. Match direto por proposta_isize (já coberto pela view, mas
+                #    pode ter data_gross vazio se o campo DATA não foi mapeado)
+                cursor.execute("""
+                    UPDATE cache_base_unificada
+                    SET data_gross = (
+                        SELECT gr.data_gross FROM gross gr
+                        WHERE gr.proposta_isize = cache_base_unificada.proposta_isize
+                          AND gr.data_gross IS NOT NULL AND gr.data_gross != ''
+                        ORDER BY gr.versao DESC LIMIT 1
+                    ),
+                    classificacao_cr = (
+                        SELECT gr.classificacao_cr FROM gross gr
+                        WHERE gr.proposta_isize = cache_base_unificada.proposta_isize
+                          AND gr.classificacao_cr IS NOT NULL AND gr.classificacao_cr != ''
+                        ORDER BY gr.versao DESC LIMIT 1
+                    )
+                    WHERE (data_gross IS NULL OR data_gross = '')
+                      AND EXISTS (
+                          SELECT 1 FROM gross gr
+                          WHERE gr.proposta_isize = cache_base_unificada.proposta_isize
+                            AND (gr.data_gross IS NOT NULL AND gr.data_gross != ''
+                                 OR gr.classificacao_cr IS NOT NULL AND gr.classificacao_cr != '')
+                      )
+                """)
+                gross_por_proposta = cursor.rowcount
+                conn.commit()
+
+                # 2. Match via telefone_portabilidade = gross.acesso
+                cursor.execute("""
+                    UPDATE cache_base_unificada
+                    SET data_gross = (
+                        SELECT gr.data_gross FROM gross gr
+                        WHERE gr.acesso = cache_base_unificada.telefone_portabilidade
+                          AND gr.data_gross IS NOT NULL AND gr.data_gross != ''
+                        ORDER BY gr.versao DESC LIMIT 1
+                    ),
+                    classificacao_cr = (
+                        SELECT gr.classificacao_cr FROM gross gr
+                        WHERE gr.acesso = cache_base_unificada.telefone_portabilidade
+                          AND gr.classificacao_cr IS NOT NULL AND gr.classificacao_cr != ''
+                        ORDER BY gr.versao DESC LIMIT 1
+                    )
+                    WHERE (data_gross IS NULL OR data_gross = '')
+                      AND telefone_portabilidade IS NOT NULL
+                      AND telefone_portabilidade != ''
+                      AND telefone_portabilidade != '-'
+                      AND telefone_portabilidade != '00000000000'
+                      AND EXISTS (
+                          SELECT 1 FROM gross gr
+                          WHERE gr.acesso = cache_base_unificada.telefone_portabilidade
+                      )
+                """)
+                gross_por_telefone = cursor.rowcount
+                conn.commit()
+
+                # 3. Match via numero_linha = gross.acesso
+                #    (acesso pode ser nova linha quando não é portado)
+                cursor.execute("""
+                    UPDATE cache_base_unificada
+                    SET data_gross = (
+                        SELECT gr.data_gross FROM gross gr
+                        WHERE gr.acesso = cache_base_unificada.numero_linha
+                          AND gr.data_gross IS NOT NULL AND gr.data_gross != ''
+                        ORDER BY gr.versao DESC LIMIT 1
+                    ),
+                    classificacao_cr = (
+                        SELECT gr.classificacao_cr FROM gross gr
+                        WHERE gr.acesso = cache_base_unificada.numero_linha
+                          AND gr.classificacao_cr IS NOT NULL AND gr.classificacao_cr != ''
+                        ORDER BY gr.versao DESC LIMIT 1
+                    )
+                    WHERE (data_gross IS NULL OR data_gross = '')
+                      AND numero_linha IS NOT NULL
+                      AND numero_linha != ''
+                      AND numero_linha != '-'
+                      AND numero_linha != '00000000000'
+                      AND EXISTS (
+                          SELECT 1 FROM gross gr
+                          WHERE gr.acesso = cache_base_unificada.numero_linha
+                      )
+                """)
+                gross_por_nova_linha = cursor.rowcount
+                conn.commit()
+
+                total_gross = gross_por_proposta + gross_por_telefone + gross_por_nova_linha
+                if total_gross > 0:
+                    logger.info(
+                        "GROSS atualizado no cache: %d por proposta, "
+                        "%d por telefone portado, %d por nova linha",
+                        gross_por_proposta, gross_por_telefone,
+                        gross_por_nova_linha,
+                    )
+        except Exception as e:
+            logger.warning("Erro ao atualizar GROSS no cache: %s", e)
+
         return {'inseridos': inseridos, 'erros': erros}

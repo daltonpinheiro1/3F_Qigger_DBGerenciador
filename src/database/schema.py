@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS lotes_importacao (
     tipo_arquivo TEXT NOT NULL CHECK (tipo_arquivo IN (
         'coverte_prop', 'portabilidade_tim', 'gross',
         'relatorio_objetos', 'resultado_gross', 'backoffice',
-        'consulta_siebel', 'migracao', 'reprocessamento'
+        'consulta_siebel', 'migracao', 'reprocessamento',
+        'vendas_eva', 'retorno_rpa_tim', 'auditoria_vendas'
     )),
     hash_sha256 TEXT NOT NULL,
     qtd_registros INTEGER DEFAULT 0,
@@ -217,16 +218,42 @@ CREATE TABLE IF NOT EXISTS cache_base_unificada (
     data_venda TEXT,
     produto TEXT,
     plano TEXT,
+    forma_pagamento TEXT,
+    nome_equipe TEXT,
+    nome_vendedor TEXT,
+    -- Dados de cliente
+    data_nascimento TEXT,
+    endereco TEXT,
+    endereco_numero TEXT,
+    complemento TEXT,
+    bairro TEXT,
+    cidade_cliente TEXT,
+    uf_cliente TEXT,
+    cep_cliente TEXT,
+    ddd_1 TEXT,
+    telefone_1 TEXT,
+    email TEXT,
+    score TEXT,
+    -- Status venda
     status_venda TEXT,
+    motivo_rejeicao_cancelamento TEXT,
+    conectada TEXT,
+    data_conectada TEXT,
     -- Dados de portabilidade
     portabilidade_status TEXT,
+    complemento_portabilidade TEXT,
     -- Dados TIM
     status_tim TEXT,
     data_ativacao_tim TEXT,
+    acesso_tim TEXT,
     -- Dados logística
     status_logistica TEXT,
     rastreio TEXT,
+    rastreio_logistica TEXT,
     data_entrega TEXT,
+    nu_pedido TEXT,
+    transportadora TEXT,
+    previsao_entrega TEXT,
     -- Dados GROSS
     data_gross TEXT,
     classificacao_cr TEXT,
@@ -235,14 +262,25 @@ CREATE TABLE IF NOT EXISTS cache_base_unificada (
     -- Dados backoffice
     status_pedido TEXT,
     detalhe_status TEXT,
+    data_atualizacao_status TEXT,
     -- Dados Siebel
+    numero_acesso TEXT,
+    codigo_externo TEXT,
     status_bilhete TEXT,
+    operadora_doadora TEXT,
+    data_portabilidade TEXT,
+    motivo_recusa TEXT,
+    motivo_cancelamento TEXT,
     status_ordem TEXT,
+    novo_status_bilhete TEXT,
     -- Dados Bluechip
     bluechip_status TEXT,
     pedido_bluechip TEXT,
+    remessa_bluechip TEXT,
+    data_maxima_prevista_entrega TEXT,
     -- Decisão
     regra_id INTEGER,
+    decisao TEXT,
     acao_a_realizar TEXT,
     tipo_mensagem TEXT,
     -- Controle
@@ -253,6 +291,8 @@ CREATE TABLE IF NOT EXISTS cache_base_unificada (
 CREATE INDEX IF NOT EXISTS idx_cache_proposta ON cache_base_unificada(proposta_isize);
 CREATE INDEX IF NOT EXISTS idx_cache_cpf ON cache_base_unificada(cpf);
 CREATE INDEX IF NOT EXISTS idx_cache_telefone ON cache_base_unificada(telefone_portabilidade);
+CREATE INDEX IF NOT EXISTS idx_cache_numero_linha ON cache_base_unificada(numero_linha);
+CREATE INDEX IF NOT EXISTS idx_cache_numero_acesso ON cache_base_unificada(numero_acesso);
 CREATE INDEX IF NOT EXISTS idx_cache_atualizado ON cache_base_unificada(atualizado_em DESC);
 """
 
@@ -518,7 +558,7 @@ CREATE INDEX IF NOT EXISTS idx_logistica_lote ON logistica(lote_importacao_id);
 SQL_GROSS = """
 CREATE TABLE IF NOT EXISTS gross (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    proposta_isize TEXT NOT NULL,
+    proposta_isize TEXT,
     acesso TEXT,
     ddd TEXT,
     custcode TEXT,
@@ -530,7 +570,7 @@ CREATE TABLE IF NOT EXISTS gross (
     versao INTEGER NOT NULL DEFAULT 1,
     lote_importacao_id INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(proposta_isize, acesso, versao),
+    UNIQUE(COALESCE(proposta_isize, ''), COALESCE(acesso, ''), versao),
     FOREIGN KEY (lote_importacao_id) REFERENCES lotes_importacao(id)
 );
 
@@ -859,6 +899,117 @@ CREATE INDEX IF NOT EXISTS idx_tipo_com_tipo ON tipo_comunicacao_template(tipo_c
 CREATE INDEX IF NOT EXISTS idx_tipo_com_template ON tipo_comunicacao_template(template_id);
 """
 
+# 2.19 vendas_eva
+SQL_VENDAS_EVA = """
+CREATE TABLE IF NOT EXISTS vendas_eva (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    numero_acesso TEXT NOT NULL,
+    operacao TEXT,
+    pedido TEXT,
+    id_atendimento TEXT,
+    data_hora_gravacao TEXT,
+    data_emissao TEXT,
+    cod_venda TEXT,
+    nome_cliente TEXT,
+    cpf TEXT,
+    telefone TEXT,
+    produto TEXT,
+    plano TEXT,
+    status_venda TEXT,
+    canal TEXT,
+    equipe TEXT,
+    vendedor TEXT,
+    supervisor TEXT,
+    dados_json TEXT,
+    versao INTEGER NOT NULL DEFAULT 1,
+    lote_importacao_id INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(numero_acesso, versao),
+    FOREIGN KEY (lote_importacao_id) REFERENCES lotes_importacao(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendas_eva_acesso ON vendas_eva(numero_acesso);
+CREATE INDEX IF NOT EXISTS idx_vendas_eva_acesso_versao ON vendas_eva(numero_acesso, versao DESC);
+CREATE INDEX IF NOT EXISTS idx_vendas_eva_cod ON vendas_eva(cod_venda);
+CREATE INDEX IF NOT EXISTS idx_vendas_eva_cpf ON vendas_eva(cpf);
+CREATE INDEX IF NOT EXISTS idx_vendas_eva_lote ON vendas_eva(lote_importacao_id);
+CREATE INDEX IF NOT EXISTS idx_vendas_eva_created ON vendas_eva(created_at DESC);
+"""
+
+# 2.20 retornos_rpa_tim
+SQL_RETORNOS_RPA_TIM = """
+CREATE TABLE IF NOT EXISTS retornos_rpa_tim (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    numero_acesso TEXT NOT NULL,
+    codigo_externo TEXT,
+    protocolo TEXT,
+    motivo_nao_migrado TEXT,
+    data_inicial_processamento TEXT,
+    data_final_processamento TEXT,
+    data_aprovacao TEXT,
+    status_classificado TEXT,
+    origem_arquivo TEXT,
+    versao INTEGER NOT NULL DEFAULT 1,
+    lote_importacao_id INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(numero_acesso, versao),
+    FOREIGN KEY (lote_importacao_id) REFERENCES lotes_importacao(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_retornos_rpa_acesso ON retornos_rpa_tim(numero_acesso);
+CREATE INDEX IF NOT EXISTS idx_retornos_rpa_acesso_versao ON retornos_rpa_tim(numero_acesso, versao DESC);
+CREATE INDEX IF NOT EXISTS idx_retornos_rpa_codigo ON retornos_rpa_tim(codigo_externo);
+CREATE INDEX IF NOT EXISTS idx_retornos_rpa_status ON retornos_rpa_tim(status_classificado);
+CREATE INDEX IF NOT EXISTS idx_retornos_rpa_lote ON retornos_rpa_tim(lote_importacao_id);
+CREATE INDEX IF NOT EXISTS idx_retornos_rpa_created ON retornos_rpa_tim(created_at DESC);
+"""
+
+# 2.21 auditoria_vendas_tim
+SQL_AUDITORIA_VENDAS_TIM = """
+CREATE TABLE IF NOT EXISTS auditoria_vendas_tim (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    numero_acesso TEXT NOT NULL,
+    cod_venda TEXT,
+    operacao TEXT,
+    pedido TEXT,
+    id_atendimento TEXT,
+    data_hora_gravacao TEXT,
+    data_emissao_eva TEXT,
+    nome_cliente TEXT,
+    cpf TEXT,
+    telefone TEXT,
+    produto TEXT,
+    plano TEXT,
+    status_venda_eva TEXT,
+    canal TEXT,
+    equipe TEXT,
+    vendedor TEXT,
+    supervisor TEXT,
+    codigo_externo TEXT,
+    protocolo TEXT,
+    motivo_nao_migrado TEXT,
+    data_inicial_processamento TEXT,
+    data_final_processamento TEXT,
+    data_aprovacao TEXT,
+    status_classificado TEXT NOT NULL,
+    vendas_eva_id INTEGER,
+    retornos_rpa_tim_id INTEGER,
+    versao INTEGER NOT NULL DEFAULT 1,
+    lote_importacao_id INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(numero_acesso, versao),
+    FOREIGN KEY (lote_importacao_id) REFERENCES lotes_importacao(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_vendas_acesso ON auditoria_vendas_tim(numero_acesso);
+CREATE INDEX IF NOT EXISTS idx_audit_vendas_acesso_versao ON auditoria_vendas_tim(numero_acesso, versao DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_vendas_cod ON auditoria_vendas_tim(cod_venda);
+CREATE INDEX IF NOT EXISTS idx_audit_vendas_status ON auditoria_vendas_tim(status_classificado);
+CREATE INDEX IF NOT EXISTS idx_audit_vendas_cpf ON auditoria_vendas_tim(cpf);
+CREATE INDEX IF NOT EXISTS idx_audit_vendas_lote ON auditoria_vendas_tim(lote_importacao_id);
+CREATE INDEX IF NOT EXISTS idx_audit_vendas_created ON auditoria_vendas_tim(created_at DESC);
+"""
+
 # =============================================================================
 # 3. Triggers
 # =============================================================================
@@ -953,6 +1104,24 @@ CREATE TRIGGER IF NOT EXISTS trg_decisoes_no_update
 BEFORE UPDATE ON decisoes
 BEGIN
     SELECT RAISE(ABORT, 'UPDATE proibido na tabela decisoes. Use INSERT com nova versao.');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_vendas_eva_no_update
+BEFORE UPDATE ON vendas_eva
+BEGIN
+    SELECT RAISE(ABORT, 'UPDATE proibido na tabela vendas_eva. Use INSERT com nova versao.');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_retornos_rpa_tim_no_update
+BEFORE UPDATE ON retornos_rpa_tim
+BEGIN
+    SELECT RAISE(ABORT, 'UPDATE proibido na tabela retornos_rpa_tim. Use INSERT com nova versao.');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_auditoria_vendas_tim_no_update
+BEFORE UPDATE ON auditoria_vendas_tim
+BEGIN
+    SELECT RAISE(ABORT, 'UPDATE proibido na tabela auditoria_vendas_tim. Use INSERT com nova versao.');
 END;
 """
 
@@ -1062,6 +1231,27 @@ BEGIN
     INSERT INTO auditoria (tabela, operacao, registro_id, chave_negocio, versao_registro, lote_importacao_id)
     VALUES ('decisoes', 'INSERT', NEW.id, NEW.proposta_isize, NEW.versao, NEW.lote_importacao_id);
 END;
+
+CREATE TRIGGER IF NOT EXISTS trg_auditoria_vendas_eva
+AFTER INSERT ON vendas_eva
+BEGIN
+    INSERT INTO auditoria (tabela, operacao, registro_id, chave_negocio, versao_registro, lote_importacao_id)
+    VALUES ('vendas_eva', 'INSERT', NEW.id, NEW.numero_acesso, NEW.versao, NEW.lote_importacao_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_auditoria_retornos_rpa_tim
+AFTER INSERT ON retornos_rpa_tim
+BEGIN
+    INSERT INTO auditoria (tabela, operacao, registro_id, chave_negocio, versao_registro, lote_importacao_id)
+    VALUES ('retornos_rpa_tim', 'INSERT', NEW.id, NEW.numero_acesso, NEW.versao, NEW.lote_importacao_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_auditoria_vendas_tim
+AFTER INSERT ON auditoria_vendas_tim
+BEGIN
+    INSERT INTO auditoria (tabela, operacao, registro_id, chave_negocio, versao_registro, lote_importacao_id)
+    VALUES ('auditoria_vendas_tim', 'INSERT', NEW.id, NEW.numero_acesso, NEW.versao, NEW.lote_importacao_id);
+END;
 """
 
 # =============================================================================
@@ -1114,10 +1304,10 @@ INNER JOIN (
 CREATE VIEW IF NOT EXISTS vw_gross_corrente AS
 SELECT g.* FROM gross g
 INNER JOIN (
-    SELECT proposta_isize, acesso, MAX(versao) AS max_versao
-    FROM gross GROUP BY proposta_isize, acesso
-) latest ON g.proposta_isize = latest.proposta_isize
-    AND g.acesso = latest.acesso
+    SELECT COALESCE(proposta_isize, '') AS pi, COALESCE(acesso, '') AS ac, MAX(versao) AS max_versao
+    FROM gross GROUP BY COALESCE(proposta_isize, ''), COALESCE(acesso, '')
+) latest ON COALESCE(g.proposta_isize, '') = latest.pi
+    AND COALESCE(g.acesso, '') = latest.ac
     AND g.versao = latest.max_versao;
 
 CREATE VIEW IF NOT EXISTS vw_resultado_gross_corrente AS
@@ -1174,6 +1364,24 @@ INNER JOIN (
 ) latest ON d.proposta_isize = latest.proposta_isize
     AND d.regra_id = latest.regra_id
     AND d.versao = latest.max_versao;
+
+CREATE VIEW IF NOT EXISTS vw_vendas_eva_corrente AS
+SELECT ve.* FROM vendas_eva ve
+INNER JOIN (
+    SELECT numero_acesso, MAX(versao) AS max_versao FROM vendas_eva GROUP BY numero_acesso
+) latest ON ve.numero_acesso = latest.numero_acesso AND ve.versao = latest.max_versao;
+
+CREATE VIEW IF NOT EXISTS vw_retornos_rpa_tim_corrente AS
+SELECT rr.* FROM retornos_rpa_tim rr
+INNER JOIN (
+    SELECT numero_acesso, MAX(versao) AS max_versao FROM retornos_rpa_tim GROUP BY numero_acesso
+) latest ON rr.numero_acesso = latest.numero_acesso AND rr.versao = latest.max_versao;
+
+CREATE VIEW IF NOT EXISTS vw_auditoria_vendas_tim_corrente AS
+SELECT avt.* FROM auditoria_vendas_tim avt
+INNER JOIN (
+    SELECT numero_acesso, MAX(versao) AS max_versao FROM auditoria_vendas_tim GROUP BY numero_acesso
+) latest ON avt.numero_acesso = latest.numero_acesso AND avt.versao = latest.max_versao;
 """
 
 # 4.1 View Unificada Principal
@@ -1320,6 +1528,9 @@ TABELAS_DADOS = [
     SQL_DECISOES,
     SQL_TEMPLATES_WPP,
     SQL_TIPO_COMUNICACAO_TEMPLATE,
+    SQL_VENDAS_EVA,
+    SQL_RETORNOS_RPA_TIM,
+    SQL_AUDITORIA_VENDAS_TIM,
 ]
 
 # Nomes das 15 tabelas de dados que possuem triggers de bloqueio e auditoria
@@ -1339,6 +1550,9 @@ TABELAS_DADOS_IMUTAVEIS = [
     'servicos_adicionais',
     'robo_processamento',
     'decisoes',
+    'vendas_eva',
+    'retornos_rpa_tim',
+    'auditoria_vendas_tim',
 ]
 
 # Nomes das tabelas de controle (UPDATE permitido)
@@ -1407,4 +1621,74 @@ def criar_schema(conn):
     # 8. Versão inicial do schema
     cursor.executescript(SQL_SCHEMA_VERSAO_INICIAL)
 
+    conn.commit()
+
+
+def migrar_lotes_importacao_check(conn):
+    """
+    Migra a tabela lotes_importacao para incluir os novos tipos de arquivo
+    (vendas_eva, retorno_rpa_tim, auditoria_vendas) no CHECK constraint.
+
+    SQLite não suporta ALTER TABLE para modificar CHECK constraints,
+    então recria a tabela preservando os dados existentes.
+    """
+    import sqlite3 as _sqlite3
+    cursor = conn.cursor()
+
+    # Verificar se a migração já foi aplicada testando um INSERT com novo tipo
+    try:
+        cursor.execute(
+            "INSERT INTO lotes_importacao (nome_arquivo, tipo_arquivo, hash_sha256) "
+            "VALUES ('__migration_test__', 'vendas_eva', '__test__')"
+        )
+        # Se chegou aqui, o CHECK já aceita o novo tipo — rollback e sair
+        conn.rollback()
+        cursor.execute(
+            "DELETE FROM lotes_importacao WHERE nome_arquivo = '__migration_test__'"
+        )
+        conn.commit()
+        return  # Migração já aplicada
+    except _sqlite3.IntegrityError:
+        conn.rollback()
+        # CHECK constraint antigo — precisa migrar
+
+    # Recriar tabela com CHECK atualizado
+    cursor.executescript("""
+        PRAGMA foreign_keys = OFF;
+
+        CREATE TABLE IF NOT EXISTS lotes_importacao_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome_arquivo TEXT NOT NULL,
+            caminho_origem TEXT,
+            tipo_arquivo TEXT NOT NULL CHECK (tipo_arquivo IN (
+                'coverte_prop', 'portabilidade_tim', 'gross',
+                'relatorio_objetos', 'resultado_gross', 'backoffice',
+                'consulta_siebel', 'migracao', 'reprocessamento',
+                'vendas_eva', 'retorno_rpa_tim', 'auditoria_vendas'
+            )),
+            hash_sha256 TEXT NOT NULL,
+            qtd_registros INTEGER DEFAULT 0,
+            qtd_inseridos INTEGER DEFAULT 0,
+            qtd_erros INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'em_andamento' CHECK (status IN (
+                'em_andamento', 'concluido', 'erro', 'duplicado'
+            )),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            finalizado_em TIMESTAMP,
+            UNIQUE(hash_sha256)
+        );
+
+        INSERT INTO lotes_importacao_new
+            SELECT * FROM lotes_importacao;
+
+        DROP TABLE lotes_importacao;
+
+        ALTER TABLE lotes_importacao_new RENAME TO lotes_importacao;
+
+        CREATE INDEX IF NOT EXISTS idx_lotes_hash ON lotes_importacao(hash_sha256);
+        CREATE INDEX IF NOT EXISTS idx_lotes_tipo ON lotes_importacao(tipo_arquivo);
+        CREATE INDEX IF NOT EXISTS idx_lotes_created ON lotes_importacao(created_at DESC);
+
+        PRAGMA foreign_keys = ON;
+    """)
     conn.commit()

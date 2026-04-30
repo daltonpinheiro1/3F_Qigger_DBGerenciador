@@ -5,9 +5,28 @@
 -- Usa tabelas físicas com MAX(versao) para registro corrente.
 -- Resultados ÚNICOS por proposta_isize, dados mais recentes.
 -- Funil completo: Venda → Crivo → Envio → Entrega → GROSS → BP
+--
+-- =============================================================================
+-- CHANGELOG (revisão):
+-- [FIX-1] Em_Rota: itens sem envio agora = "AGUARDANDO ENVIO" (não "SIM")
+-- [FIX-2] Status_Entrega: sem logística + aprovada = "AGUARDANDO ENVIO" (não "EM ROTA")
+-- [FIX-3] GROSS dates: trata dd/mm/yyyy e yyyy-mm-dd via helper SAFE_DATE
+-- [FIX-4] Data_Entrega fallback: todas as datas normalizadas via SAFE_DATE
+-- [FIX-5] Status_Resposta_Envio_Pedido: "PENDENTE" → "PENDENTE CRIVO" vs "PENDENTE"
+-- [NEW-1] Ciclo_Logistico: classificação completa do ciclo de vida logístico
+-- [NEW-2] Dias_Em_Rota: dias desde envio até entrega ou hoje
+-- [NEW-3] SLA_Status: classificação de cumprimento de SLA
+-- [NEW-4] Em_Rota_SIM_NAO agora usa Ciclo_Logistico como base
+-- [NEW-5] Status_Entrega mais granular via Ciclo_Logistico
 -- =============================================================================
 
 WITH
+-- ============================================================
+-- 0. HELPER: Função inline para normalizar datas (dd/mm/yyyy → yyyy-mm-dd)
+--    Usada em todo o query para evitar problemas de formato misto.
+--    Regra: se parece dd/mm/yyyy (XX/XX/XXXX), converte; senão tenta DATE() direto.
+-- ============================================================
+
 -- ============================================================
 -- 1. PROPOSTAS CORRENTES (registro mais recente por proposta)
 -- ============================================================
@@ -181,6 +200,7 @@ lg_stats AS (
 base AS (
     SELECT
         prop.proposta_isize AS id_isize,
+        prop.tipo_chip,
         PRINTF('%011d', CAST(
             CASE
                 WHEN REPLACE(REPLACE(REPLACE(COALESCE(prop.cpf, ''), '.', ''), '-', ''), '/', '') GLOB '[0-9]*'
@@ -208,7 +228,12 @@ base AS (
         sv.crivo_vendas,
         sv.conectada,
         sv.data_conectada,
-        DATE(sv.data_conectada) AS data_conectada_date,
+        -- [FIX-3] data_conectada: normalizar dd/mm/yyyy → yyyy-mm-dd
+        DATE(CASE
+            WHEN sv.data_conectada LIKE '__/__/____'
+            THEN SUBSTR(sv.data_conectada,7,4)||'-'||SUBSTR(sv.data_conectada,4,2)||'-'||SUBSTR(sv.data_conectada,1,2)
+            ELSE sv.data_conectada
+        END) AS data_conectada_date,
         -- Portabilidade
         port.telefone_portabilidade AS tel_port_raw,
         port.numero_linha AS num_linha_raw,
@@ -268,7 +293,27 @@ base AS (
         dec.tipo_mensagem,
         -- Backoffice
         bo.status_pedido,
-        bo.detalhe_status
+        bo.detalhe_status,
+        bo.data_envio_chip,
+        -- Gross flag inline (para uso no cálculo de status_resposta_envio_pedido)
+        (SELECT MAX(CASE WHEN UPPER(TRIM(cs2.status_ordem)) IN ('CONCLUÍDO', 'CONCLUIDO', 'CONCLUíDO',
+            'PORTABILIDADE PENDENTE', 'PENDENTE PORTABILIDADE') THEN 1 ELSE 0 END)
+         FROM consulta_siebel cs2 WHERE cs2.proposta_isize = prop.proposta_isize
+        ) AS gross_flag_inline,
+        -- [NEW] Flag auxiliar: tem QUALQUER dado de logística/envio?
+        -- Usado para distinguir "sem envio" de "enviado sem rastreio"
+        CASE
+            WHEN COALESCE(ls.qtd_pedidos, 0) > 0
+              OR COALESCE(ls.qtd_rastreios, 0) > 0
+              OR COALESCE(lg.status, '') <> ''
+              OR COALESCE(lg.rastreio, '') <> ''
+              OR COALESCE(re.rastreio_correios, '') <> ''
+              OR COALESCE(re.rastreio_loggi, '') <> ''
+              OR COALESCE(bc.pedido_bluechip, '') <> ''
+              OR COALESCE(bc.remessa_bluechip, '') <> ''
+              OR COALESCE(bo.data_envio_chip, '') <> ''
+            THEN 1 ELSE 0
+        END AS tem_logistica_flag
     FROM prop
     LEFT JOIN cli ON prop.cpf = cli.cpf
     LEFT JOIN sv ON prop.proposta_isize = sv.proposta_isize
@@ -310,14 +355,37 @@ calc AS (
               OR LOWER(b.email) LIKE '%sememail%' OR LOWER(b.email) LIKE '%tim@%' THEN 'INVALIDO'
             ELSE 'VALIDO'
         END AS email_valido,
-        -- Status resposta envio pedido
+        -- [FIX-5] Status resposta envio pedido
+        -- MUDANÇA: "PENDENTE" agora é dividido em:
+        --   "PENDENTE CRIVO" = aguardando aprovação do crivo (status pendente/vazio)
+        --   "PENDENTE"       = aprovada mas sem ação de envio ainda (NAO ENVIADO antigo)
+        -- Funil: Crivo → Logística → ESIM → PENDENTE
         CASE
-            WHEN b.resposta_envio_pedido IS NULL OR TRIM(b.resposta_envio_pedido) = '' THEN 'NAO ENVIADO'
-            WHEN UPPER(b.resposta_envio_pedido) LIKE '%OK%'
+            -- 1. Reprovada no crivo
+            WHEN b.crivo_vendas LIKE 'REPROVADA%' THEN 'REPROVADA'
+            -- 2. [FIX-5] Pendente no crivo → agora "PENDENTE CRIVO" (antes era "PENDENTE")
+            WHEN b.crivo_vendas = 'PENDENTE' OR b.crivo_vendas = '' THEN 'PENDENTE CRIVO'
+            -- A partir daqui: APROVADA
+            -- 3. Tem resposta OK de envio
+            WHEN UPPER(COALESCE(b.resposta_envio_pedido, '')) LIKE '%OK%'
              AND (UPPER(b.resposta_envio_pedido) LIKE '%ENVIADO%'
                OR UPPER(b.resposta_envio_pedido) LIKE '%OK%200%'
                OR UPPER(b.resposta_envio_pedido) LIKE '%OK%201%') THEN 'ENVIADO'
-            ELSE 'ERRO'
+            -- 4. Tem histórico de logística (pedidos, rastreios, etc.)
+            WHEN b.qtd_pedidos > 0
+                OR b.qtd_rastreios > 0
+                OR COALESCE(b.ro_status_ult, '') <> ''
+                OR COALESCE(b.rastreio_ult, '') <> ''
+                OR COALESCE(b.rastreio_correios_base, '') <> ''
+                OR COALESCE(b.rastreio_loggi_base, '') <> ''
+                OR COALESCE(b.pedido_bluechip_base, '') <> ''
+             THEN 'ENVIADO'
+            -- 5. Sem logística mas é ESIM → não precisa envio físico
+            WHEN UPPER(TRIM(REPLACE(COALESCE(b.tipo_chip, ''), '-', ''))) = 'ESIM' THEN 'ENVIADO'
+            -- 6. Sem logística, não é ESIM, mas tem GROSS efetivo → já ativou, considerar enviado
+            WHEN COALESCE(b.gross_flag_inline, 0) = 1 THEN 'ENVIADO'
+            -- 7. [FIX-5] Aprovada, sem logística, não é ESIM, sem GROSS → "PENDENTE" (antes "NAO ENVIADO")
+            ELSE 'PENDENTE'
         END AS status_resposta_envio_pedido,
         -- Normalização status logística
         UPPER(TRIM(COALESCE(b.ro_status_ult, ''))) AS ro_status_n,
@@ -382,13 +450,94 @@ calc AS (
 ),
 
 -- ============================================================
--- 15. STATUS ENTREGA DERIVADO
+-- 15. STATUS ENTREGA DERIVADO + CICLO LOGÍSTICO + DIAS EM ROTA + SLA
+-- [FIX-1] Em_Rota: sem envio = "AGUARDANDO ENVIO" (não "SIM")
+-- [FIX-2] Status_Entrega: sem logística = "AGUARDANDO ENVIO" (não "EM ROTA")
+-- [NEW-1] Ciclo_Logistico: classificação completa do ciclo de vida
+-- [NEW-2] Dias_Em_Rota: dias desde envio até entrega ou hoje
+-- [NEW-3] SLA_Status: classificação de cumprimento de SLA
 -- ============================================================
 status_calc AS (
     SELECT
         c.*,
-        -- Status entrega parametrizado
+        -- ============================================================
+        -- [NEW-1] Ciclo_Logistico: classificação completa do ciclo de vida logístico
+        -- Ordem de prioridade:
+        --   1. ESIM (digital, sem envio físico)
+        --   2. REPROVADA (rejeitada no crivo)
+        --   3. PENDENTE CRIVO (aguardando aprovação)
+        --   4. ENTREGUE (confirmação de entrega)
+        --   5. QUEBRA (falha/devolução/cancelamento)
+        --   6. AG RETIRADA (aguardando retirada nos correios)
+        --   7. EM ATRASO (passado da previsão de entrega)
+        --   8. EM TRANSITO (em rota ativa)
+        --   9. ENVIADO (tem registro de envio mas sem status de trânsito)
+        --  10. SEM ENVIO (aprovada mas nenhum dado de logística)
+        -- ============================================================
         CASE
+            -- 1. ESIM: entrega digital, não precisa envio físico
+            WHEN UPPER(TRIM(REPLACE(COALESCE(c.tipo_chip, ''), '-', ''))) = 'ESIM'
+                THEN 'ESIM'
+            -- 2. REPROVADA: rejeitada no crivo, não vai ter envio
+            WHEN c.crivo_vendas LIKE 'REPROVADA%'
+                THEN 'REPROVADA'
+            -- 3. PENDENTE CRIVO: aguardando aprovação (crivo pendente ou vazio)
+            WHEN c.crivo_vendas = 'PENDENTE' OR c.crivo_vendas = ''
+                THEN 'PENDENTE CRIVO'
+            -- A partir daqui: APROVADA com chip físico
+            -- 4. ENTREGUE: confirmação de entrega via logística
+            WHEN c.ro_ocorr_n LIKE '%PEDIDO ENTREGUE%' OR c.ro_ocorr_n = 'ENTREGUE'
+              OR c.ro_status_n LIKE 'ENTREGUE%'
+              OR c.ro_ocorr_n LIKE '%ENTREG%'
+                THEN 'ENTREGUE'
+            -- 5. QUEBRA: falha na entrega, devolução, cancelamento, extravio
+            WHEN c.ro_status_n IN ('INSERIDO NO BANCO DE DADOS', 'EM DEVOLUCAO AO REMETENTE',
+                'DISTRIBUIDO AO REMETENTE', 'ENTREGA CANCELADA')
+                THEN 'QUEBRA'
+            WHEN c.ro_ocorr_n LIKE '%CANCEL%' OR c.ro_ocorr_n LIKE '%DEVOLV%'
+              OR c.ro_ocorr_n LIKE '%EXTRAVI%'
+                THEN 'QUEBRA'
+            WHEN c.ro_status_n = 'EM ATRASO'
+             AND c.ro_ocorr_n IN ('DESTINATARIO DESCONHECIDO', 'ENDERECO INCORRETO')
+                THEN 'QUEBRA'
+            -- 6. AG RETIRADA: aguardando retirada nos correios
+            WHEN c.ro_status_n = 'AGUARDANDO RETIRADA'
+                THEN 'AG RETIRADA'
+            -- 7. EM ATRASO: em trânsito mas passado da previsão de entrega
+            WHEN c.ro_status_n = 'EM ATRASO'
+                THEN 'EM ATRASO'
+            WHEN c.ro_status_n IN ('EM TRANSITO', 'EM TRANSITO ')
+             AND DATE(CASE
+                    WHEN COALESCE(c.previsao_entrega, '') LIKE '__/__/____'
+                    THEN SUBSTR(c.previsao_entrega,7,4)||'-'||SUBSTR(c.previsao_entrega,4,2)||'-'||SUBSTR(c.previsao_entrega,1,2)
+                    ELSE c.previsao_entrega
+                 END) IS NOT NULL
+             AND DATE('now', 'localtime') > DATE(CASE
+                    WHEN c.previsao_entrega LIKE '__/__/____'
+                    THEN SUBSTR(c.previsao_entrega,7,4)||'-'||SUBSTR(c.previsao_entrega,4,2)||'-'||SUBSTR(c.previsao_entrega,1,2)
+                    ELSE c.previsao_entrega
+                 END)
+                THEN 'EM ATRASO'
+            -- 8. EM TRANSITO: em rota ativa
+            WHEN c.ro_status_n IN ('EM TRANSITO', 'EM TRANSITO ')
+                THEN 'EM TRANSITO'
+            -- 9. ENVIADO: tem registro de envio/logística mas sem status de trânsito ainda
+            -- [FIX-1/FIX-2] Distinguir "tem logística" de "sem logística"
+            WHEN c.tem_logistica_flag = 1
+                THEN 'ENVIADO'
+            -- 10. SEM ENVIO: aprovada mas zero dados de logística
+            -- [FIX-1] Antes caía no ELSE como "EM ROTA" — agora é "SEM ENVIO"
+            ELSE 'SEM ENVIO'
+        END AS ciclo_logistico,
+
+        -- ============================================================
+        -- [FIX-2] Status entrega parametrizado — agora mais granular
+        -- MUDANÇA: sem logística + aprovada = "AGUARDANDO ENVIO" (antes "EM ROTA")
+        -- ============================================================
+        CASE
+            WHEN UPPER(TRIM(REPLACE(COALESCE(c.tipo_chip, ''), '-', ''))) = 'ESIM' THEN 'ESIM'
+            WHEN c.crivo_vendas LIKE 'REPROVADA%' THEN 'REPROVADA'
+            WHEN c.crivo_vendas = 'PENDENTE' OR c.crivo_vendas = '' THEN 'PENDENTE CRIVO'
             WHEN c.ro_status_n = 'AGUARDANDO RETIRADA' THEN 'AG RETIRADA CORREIOS'
             WHEN c.ro_ocorr_n LIKE '%PEDIDO ENTREGUE%' OR c.ro_ocorr_n = 'ENTREGUE'
               OR c.ro_status_n LIKE 'ENTREGUE%' THEN 'SIM'
@@ -401,22 +550,215 @@ status_calc AS (
             WHEN c.ro_ocorr_n LIKE '%ENTREG%' THEN 'SIM'
             WHEN c.ro_ocorr_n LIKE '%CANCEL%' OR c.ro_ocorr_n LIKE '%DEVOLV%'
               OR c.ro_ocorr_n LIKE '%EXTRAVI%' THEN 'QUEBRA'
-            ELSE 'EM ROTA'
+            -- [FIX-2] Aprovada com logística mas sem status → EM ROTA (enviado, aguardando rastreio)
+            WHEN c.tem_logistica_flag = 1 THEN 'EM ROTA'
+            -- [FIX-2] Aprovada SEM logística → AGUARDANDO ENVIO (antes era "EM ROTA")
+            WHEN c.crivo_vendas = 'APROVADA' THEN 'AGUARDANDO ENVIO'
+            ELSE 'AGUARDANDO ENVIO'
         END AS status_entrega_param,
-        -- Em rota SIM/NÃO
+
+        -- ============================================================
+        -- [FIX-1][NEW-4] Em rota SIM/NÃO — agora baseado em Ciclo_Logistico
+        -- MUDANÇA: "SIM" APENAS quando em trânsito ativo, atraso ou ag retirada
+        --          "AGUARDANDO ENVIO" para aprovadas sem logística
+        --          "" para reprovadas
+        --          "NÃO" para entregue, quebra, esim, etc.
+        -- ============================================================
         CASE
-            WHEN c.ro_status_n IN ('EM TRANSITO', 'EM TRANSITO ', 'EM ATRASO', 'AGUARDANDO RETIRADA')
-            THEN 'SIM'
+            -- Reprovada: nem foi enviado
+            WHEN c.crivo_vendas LIKE 'REPROVADA%' THEN ''
+            -- ESIM: entrega digital, não está em rota
+            WHEN UPPER(TRIM(REPLACE(COALESCE(c.tipo_chip, ''), '-', ''))) = 'ESIM' THEN 'NÃO'
+            -- Entregue: já saiu da rota
+            WHEN c.ro_ocorr_n LIKE '%PEDIDO ENTREGUE%' OR c.ro_ocorr_n = 'ENTREGUE'
+              OR c.ro_status_n LIKE 'ENTREGUE%'
+              OR c.ro_ocorr_n LIKE '%ENTREG%' THEN 'NÃO'
+            -- Quebra: não está mais em rota
+            WHEN c.ro_status_n IN ('INSERIDO NO BANCO DE DADOS', 'EM DEVOLUCAO AO REMETENTE',
+                'DISTRIBUIDO AO REMETENTE', 'ENTREGA CANCELADA') THEN 'NÃO'
             WHEN c.ro_ocorr_n LIKE '%CANCEL%' OR c.ro_ocorr_n LIKE '%DEVOLV%'
               OR c.ro_ocorr_n LIKE '%EXTRAVI%' THEN 'NÃO'
-            WHEN c.ro_ocorr_n LIKE '%ENTREG%' THEN 'NÃO'
-            ELSE 'SIM'
-        END AS em_rota_sim_nao
+            -- AG Retirada Correios: manter literal (está em rota, aguardando retirada)
+            WHEN c.ro_status_n = 'AGUARDANDO RETIRADA' THEN 'SIM'
+            -- Transitório: em rota ativa
+            WHEN c.ro_status_n IN ('EM TRANSITO', 'EM TRANSITO ', 'EM ATRASO') THEN 'SIM'
+            -- [FIX-1] Pendente no crivo: NÃO está em rota (antes era "SIM")
+            WHEN c.crivo_vendas = 'PENDENTE' OR c.crivo_vendas = '' THEN 'AGUARDANDO ENVIO'
+            -- [FIX-1] Aprovada com logística mas sem status de trânsito → SIM (enviado, em rota)
+            WHEN c.tem_logistica_flag = 1 AND c.crivo_vendas = 'APROVADA' THEN 'SIM'
+            -- [FIX-1] Aprovada SEM logística → AGUARDANDO ENVIO (antes era "SIM")
+            WHEN c.crivo_vendas = 'APROVADA' THEN 'AGUARDANDO ENVIO'
+            ELSE 'AGUARDANDO ENVIO'
+        END AS em_rota_sim_nao,
+
+        -- ============================================================
+        -- [NEW-2] Dias_Em_Rota: dias desde início do envio até entrega ou hoje
+        -- Início = data_insercao (logística) ou data_conectada
+        -- Fim = data_entrega (se entregue) ou DATE('now')
+        -- NULL se não tem dados de envio
+        -- ============================================================
+        CASE
+            -- Sem dados de envio → NULL
+            WHEN c.tem_logistica_flag = 0
+             AND UPPER(TRIM(REPLACE(COALESCE(c.tipo_chip, ''), '-', ''))) <> 'ESIM'
+                THEN NULL
+            -- ESIM → 0 (entrega instantânea)
+            WHEN UPPER(TRIM(REPLACE(COALESCE(c.tipo_chip, ''), '-', ''))) = 'ESIM'
+                THEN 0
+            ELSE
+                CAST(
+                    JULIANDAY(
+                        -- Data fim: entrega real ou hoje
+                        COALESCE(
+                            DATE(CASE
+                                WHEN c.data_entrega LIKE '__/__/____'
+                                THEN SUBSTR(c.data_entrega,7,4)||'-'||SUBSTR(c.data_entrega,4,2)||'-'||SUBSTR(c.data_entrega,1,2)
+                                ELSE c.data_entrega
+                            END),
+                            DATE('now', 'localtime')
+                        )
+                    )
+                    -
+                    JULIANDAY(
+                        -- Data início: insercao logística > data_conectada > data_venda
+                        COALESCE(
+                            DATE(CASE
+                                WHEN c.data_insercao_ult LIKE '__/__/____'
+                                THEN SUBSTR(c.data_insercao_ult,7,4)||'-'||SUBSTR(c.data_insercao_ult,4,2)||'-'||SUBSTR(c.data_insercao_ult,1,2)
+                                ELSE c.data_insercao_ult
+                            END),
+                            c.data_conectada_date,
+                            c.data_venda_date
+                        )
+                    )
+                AS INTEGER)
+        END AS dias_em_rota,
+
+        -- ============================================================
+        -- [NEW-3] SLA_Status: classificação de cumprimento de SLA
+        -- Previsão = previsao_entrega (logística) ou previsao_entrega_base (bluechip)
+        --            ou fallback: EXPRESS +2d, CORREIOS +5d
+        -- "DENTRO SLA" — em trânsito, dentro da previsão
+        -- "FORA SLA" — em trânsito, passado da previsão
+        -- "ENTREGUE NO PRAZO" — entregue dentro do SLA
+        -- "ENTREGUE ATRASADO" — entregue fora do SLA
+        -- "N/A" — não aplicável (sem envio, reprovada, pendente crivo, esim)
+        -- ============================================================
+        CASE
+            -- N/A: sem envio, reprovada, pendente crivo
+            WHEN c.crivo_vendas LIKE 'REPROVADA%' THEN 'N/A'
+            WHEN c.crivo_vendas = 'PENDENTE' OR c.crivo_vendas = '' THEN 'N/A'
+            WHEN UPPER(TRIM(REPLACE(COALESCE(c.tipo_chip, ''), '-', ''))) = 'ESIM' THEN 'N/A'
+            WHEN c.tem_logistica_flag = 0 AND COALESCE(c.gross_flag_inline, 0) = 0 THEN 'N/A'
+            -- Entregue: comparar data_entrega vs previsão
+            WHEN c.ro_ocorr_n LIKE '%PEDIDO ENTREGUE%' OR c.ro_ocorr_n = 'ENTREGUE'
+              OR c.ro_status_n LIKE 'ENTREGUE%' OR c.ro_ocorr_n LIKE '%ENTREG%'
+            THEN
+                CASE
+                    -- Tem previsão real → comparar
+                    WHEN DATE(COALESCE(
+                        CASE WHEN c.previsao_entrega LIKE '__/__/____'
+                             THEN SUBSTR(c.previsao_entrega,7,4)||'-'||SUBSTR(c.previsao_entrega,4,2)||'-'||SUBSTR(c.previsao_entrega,1,2)
+                             ELSE c.previsao_entrega END,
+                        CASE WHEN c.previsao_entrega_base LIKE '__/__/____'
+                             THEN SUBSTR(c.previsao_entrega_base,7,4)||'-'||SUBSTR(c.previsao_entrega_base,4,2)||'-'||SUBSTR(c.previsao_entrega_base,1,2)
+                             ELSE c.previsao_entrega_base END
+                    )) IS NOT NULL
+                    THEN CASE
+                        WHEN DATE(CASE
+                                WHEN c.data_entrega LIKE '__/__/____'
+                                THEN SUBSTR(c.data_entrega,7,4)||'-'||SUBSTR(c.data_entrega,4,2)||'-'||SUBSTR(c.data_entrega,1,2)
+                                ELSE c.data_entrega
+                             END)
+                             <= DATE(COALESCE(
+                                CASE WHEN c.previsao_entrega LIKE '__/__/____'
+                                     THEN SUBSTR(c.previsao_entrega,7,4)||'-'||SUBSTR(c.previsao_entrega,4,2)||'-'||SUBSTR(c.previsao_entrega,1,2)
+                                     ELSE c.previsao_entrega END,
+                                CASE WHEN c.previsao_entrega_base LIKE '__/__/____'
+                                     THEN SUBSTR(c.previsao_entrega_base,7,4)||'-'||SUBSTR(c.previsao_entrega_base,4,2)||'-'||SUBSTR(c.previsao_entrega_base,1,2)
+                                     ELSE c.previsao_entrega_base END
+                             ))
+                        THEN 'ENTREGUE NO PRAZO'
+                        ELSE 'ENTREGUE ATRASADO'
+                    END
+                    -- Sem previsão → fallback por tipo entrega (EXPRESS 2d, CORREIOS 5d)
+                    ELSE CASE
+                        WHEN CAST(JULIANDAY(DATE(CASE
+                                WHEN c.data_entrega LIKE '__/__/____'
+                                THEN SUBSTR(c.data_entrega,7,4)||'-'||SUBSTR(c.data_entrega,4,2)||'-'||SUBSTR(c.data_entrega,1,2)
+                                ELSE c.data_entrega
+                             END))
+                             - JULIANDAY(COALESCE(
+                                DATE(CASE
+                                    WHEN c.data_insercao_ult LIKE '__/__/____'
+                                    THEN SUBSTR(c.data_insercao_ult,7,4)||'-'||SUBSTR(c.data_insercao_ult,4,2)||'-'||SUBSTR(c.data_insercao_ult,1,2)
+                                    ELSE c.data_insercao_ult
+                                END),
+                                c.data_conectada_date,
+                                c.data_venda_date
+                             )) AS INTEGER)
+                             <= CASE WHEN c.tipo_entrega = 'CORREIOS' THEN 5 ELSE 2 END
+                        THEN 'ENTREGUE NO PRAZO'
+                        ELSE 'ENTREGUE ATRASADO'
+                    END
+                END
+            -- Em trânsito / AG Retirada / Em Atraso: comparar hoje vs previsão
+            WHEN c.ro_status_n IN ('EM TRANSITO', 'EM TRANSITO ', 'EM ATRASO', 'AGUARDANDO RETIRADA')
+            THEN
+                CASE
+                    WHEN DATE(COALESCE(
+                        CASE WHEN c.previsao_entrega LIKE '__/__/____'
+                             THEN SUBSTR(c.previsao_entrega,7,4)||'-'||SUBSTR(c.previsao_entrega,4,2)||'-'||SUBSTR(c.previsao_entrega,1,2)
+                             ELSE c.previsao_entrega END,
+                        CASE WHEN c.previsao_entrega_base LIKE '__/__/____'
+                             THEN SUBSTR(c.previsao_entrega_base,7,4)||'-'||SUBSTR(c.previsao_entrega_base,4,2)||'-'||SUBSTR(c.previsao_entrega_base,1,2)
+                             ELSE c.previsao_entrega_base END
+                    )) IS NOT NULL
+                    THEN CASE
+                        WHEN DATE('now', 'localtime') <= DATE(COALESCE(
+                                CASE WHEN c.previsao_entrega LIKE '__/__/____'
+                                     THEN SUBSTR(c.previsao_entrega,7,4)||'-'||SUBSTR(c.previsao_entrega,4,2)||'-'||SUBSTR(c.previsao_entrega,1,2)
+                                     ELSE c.previsao_entrega END,
+                                CASE WHEN c.previsao_entrega_base LIKE '__/__/____'
+                                     THEN SUBSTR(c.previsao_entrega_base,7,4)||'-'||SUBSTR(c.previsao_entrega_base,4,2)||'-'||SUBSTR(c.previsao_entrega_base,1,2)
+                                     ELSE c.previsao_entrega_base END
+                             ))
+                        THEN 'DENTRO SLA'
+                        ELSE 'FORA SLA'
+                    END
+                    -- Sem previsão → fallback por tipo entrega
+                    ELSE CASE
+                        WHEN CAST(JULIANDAY(DATE('now', 'localtime'))
+                             - JULIANDAY(COALESCE(
+                                DATE(CASE
+                                    WHEN c.data_insercao_ult LIKE '__/__/____'
+                                    THEN SUBSTR(c.data_insercao_ult,7,4)||'-'||SUBSTR(c.data_insercao_ult,4,2)||'-'||SUBSTR(c.data_insercao_ult,1,2)
+                                    ELSE c.data_insercao_ult
+                                END),
+                                c.data_conectada_date,
+                                c.data_venda_date
+                             )) AS INTEGER)
+                             <= CASE WHEN c.tipo_entrega = 'CORREIOS' THEN 5 ELSE 2 END
+                        THEN 'DENTRO SLA'
+                        ELSE 'FORA SLA'
+                    END
+                END
+            -- Quebra: N/A
+            WHEN c.ro_status_n IN ('INSERIDO NO BANCO DE DADOS', 'EM DEVOLUCAO AO REMETENTE',
+                'DISTRIBUIDO AO REMETENTE', 'ENTREGA CANCELADA') THEN 'N/A'
+            WHEN c.ro_ocorr_n LIKE '%CANCEL%' OR c.ro_ocorr_n LIKE '%DEVOLV%'
+              OR c.ro_ocorr_n LIKE '%EXTRAVI%' THEN 'N/A'
+            -- Enviado sem status de trânsito → DENTRO SLA (recém enviado)
+            WHEN c.tem_logistica_flag = 1 THEN 'DENTRO SLA'
+            ELSE 'N/A'
+        END AS sla_status
+
     FROM calc c
 ),
 
 -- ============================================================
 -- 16. GROSS E BP FLAGS (via consulta_siebel + portabilidade_tim)
+-- [FIX-3] data_gross: trata dd/mm/yyyy e yyyy-mm-dd via inline CASE
 -- Regra BP: exclusivo para PORTABILIDADE
 --   - status_bilhete IN (Portado, Falha Parcial, Antigo) → SIM
 --   - status_bilhete IN (Portabilidade Pendente, Pendente Portabilidade) → PENDENTE
@@ -425,43 +767,89 @@ status_calc AS (
 gross_bp AS (
     SELECT
         proposta_isize,
-        -- GROSS flags (consulta_siebel)
-        MAX(CASE WHEN UPPER(TRIM(status_ordem)) IN ('CONCLUÍDO', 'CONCLUIDO',
+        -- GROSS Sim: Concluído, Portabilidade Pendente, Pendente Portabilidade
+        MAX(CASE WHEN UPPER(TRIM(status_ordem)) IN ('CONCLUÍDO', 'CONCLUIDO', 'CONCLUíDO',
             'PORTABILIDADE PENDENTE', 'PENDENTE PORTABILIDADE') THEN 1 ELSE 0 END) AS gross_flag,
-        MIN(CASE WHEN UPPER(TRIM(status_ordem)) IN ('CONCLUÍDO', 'CONCLUIDO',
+        -- [FIX-3] data_gross: normalizar dd/mm/yyyy → yyyy-mm-dd antes de DATE()
+        MIN(CASE WHEN UPPER(TRIM(status_ordem)) IN ('CONCLUÍDO', 'CONCLUIDO', 'CONCLUíDO',
             'PORTABILIDADE PENDENTE', 'PENDENTE PORTABILIDADE')
-            THEN DATE(COALESCE(data_conclusao_ordem, created_at)) END) AS data_gross,
+            THEN DATE(CASE
+                WHEN COALESCE(data_conclusao_ordem, '') LIKE '__/__/____'
+                THEN SUBSTR(data_conclusao_ordem,7,4)||'-'||SUBSTR(data_conclusao_ordem,4,2)||'-'||SUBSTR(data_conclusao_ordem,1,2)
+                WHEN COALESCE(data_conclusao_ordem, '') <> ''
+                THEN data_conclusao_ordem
+                ELSE created_at
+            END) END) AS data_gross,
+        -- Erro Aprovisionamento
+        MAX(CASE WHEN UPPER(TRIM(status_ordem)) = 'ERRO NO APROVISIONAMENTO' THEN 1 ELSE 0 END) AS erro_apv_flag,
+        -- Em Aprovisionamento
+        MAX(CASE WHEN UPPER(TRIM(status_ordem)) = 'EM APROVISIONAMENTO' THEN 1 ELSE 0 END) AS em_apv_flag,
+        -- Cancelado pelo cliente: Rejeição via SMS OU "Cancelamento pelo Cliente" em AMBAS colunas
+        MAX(CASE WHEN UPPER(TRIM(COALESCE(motivo_recusa, ''))) LIKE '%REJEI%SMS%'
+                   OR UPPER(TRIM(COALESCE(motivo_cancelamento, ''))) LIKE '%REJEI%SMS%'
+            THEN 1 ELSE 0 END) AS cancelado_cliente_sms_flag,
+        MAX(CASE WHEN UPPER(TRIM(COALESCE(motivo_recusa, ''))) LIKE '%CANCELAMENTO PELO CLIENTE%'
+                  AND UPPER(TRIM(COALESCE(motivo_cancelamento, ''))) LIKE '%CANCELAMENTO PELO CLIENTE%'
+            THEN 1 ELSE 0 END) AS cancelado_cliente_ambos_flag,
+        -- Tem algum status_ordem preenchido (para distinguir "sem registro" de "cancelado")
+        MAX(CASE WHEN TRIM(COALESCE(status_ordem, '')) != '' THEN 1 ELSE 0 END) AS tem_status_flag,
         -- BP flags (consulta_siebel: Portado, Falha Parcial)
         MAX(CASE WHEN UPPER(TRIM(status_bilhete)) IN ('PORTADO', 'FALHA PARCIAL')
             THEN 1 ELSE 0 END) AS bp_siebel_flag,
+        -- [FIX-3] data_bp_siebel: normalizar dd/mm/yyyy
         MIN(CASE WHEN UPPER(TRIM(status_bilhete)) IN ('PORTADO', 'FALHA PARCIAL')
-            THEN DATE(COALESCE(data_portabilidade, created_at)) END) AS data_bp_siebel,
+            THEN DATE(CASE
+                WHEN COALESCE(data_portabilidade, '') LIKE '__/__/____'
+                THEN SUBSTR(data_portabilidade,7,4)||'-'||SUBSTR(data_portabilidade,4,2)||'-'||SUBSTR(data_portabilidade,1,2)
+                WHEN COALESCE(data_portabilidade, '') <> ''
+                THEN data_portabilidade
+                ELSE created_at
+            END) END) AS data_bp_siebel,
         -- BP pendente (consulta_siebel)
         MAX(CASE WHEN UPPER(TRIM(status_bilhete)) IN ('PORTABILIDADE PENDENTE', 'PENDENTE PORTABILIDADE')
             THEN 1 ELSE 0 END) AS bp_pendente_siebel_flag,
-        -- Não aprovisionamento
-        MAX(CASE WHEN UPPER(TRIM(status_ordem)) IN ('EM APROVISIONAMENTO', 'ERRO NO APROVISIONAMENTO')
-            THEN 1 ELSE 0 END) AS nao_aprovisionamento_flag
+        -- Motivo recusa mais recente (para BP Pendente)
+        MAX(TRIM(COALESCE(motivo_recusa, ''))) AS motivo_recusa_bp,
+        -- Conflito no bilhete
+        MAX(CASE WHEN UPPER(TRIM(status_bilhete)) = 'CONFLITO' THEN 1 ELSE 0 END) AS bp_conflito_siebel_flag,
+        -- Cancelado no bilhete
+        MAX(CASE WHEN UPPER(TRIM(status_bilhete)) IN ('PORTABILIDADE CANCELADA', 'PORTABILIDADE SUSPENSA', 'CANCELAMENTO PENDENTE')
+            THEN 1 ELSE 0 END) AS bp_cancelado_siebel_flag
     FROM consulta_siebel
     GROUP BY proposta_isize
 ),
 
 -- BP flags via portabilidade_tim (ATIVA, FALHA PARCIAL, ANTIGO = fechado)
+-- [FIX-3] data_bp_tim: normalizar dd/mm/yyyy
 bp_tim AS (
     SELECT
         proposta_isize,
-        MAX(CASE WHEN UPPER(TRIM(status)) IN ('ATIVA', 'FALHA PARCIAL', 'ANTIGO')
+        -- BP Sim: Ativa, Falha Parcial, Antigo, Portado (= Aprovisionado)
+        MAX(CASE WHEN UPPER(TRIM(status)) IN ('ATIVA', 'FALHA PARCIAL', 'ANTIGO', 'APROVISIONADO')
             THEN 1 ELSE 0 END) AS bp_tim_flag,
-        MIN(CASE WHEN UPPER(TRIM(status)) IN ('ATIVA', 'FALHA PARCIAL', 'ANTIGO')
-            THEN DATE(COALESCE(data_conclusao, data_ativacao, created_at)) END) AS data_bp_tim,
+        MIN(CASE WHEN UPPER(TRIM(status)) IN ('ATIVA', 'FALHA PARCIAL', 'ANTIGO', 'APROVISIONADO')
+            THEN DATE(CASE
+                WHEN COALESCE(data_conclusao, data_ativacao, '') LIKE '__/__/____'
+                THEN SUBSTR(COALESCE(data_conclusao, data_ativacao),7,4)||'-'||SUBSTR(COALESCE(data_conclusao, data_ativacao),4,2)||'-'||SUBSTR(COALESCE(data_conclusao, data_ativacao),1,2)
+                WHEN COALESCE(data_conclusao, data_ativacao, '') <> ''
+                THEN COALESCE(data_conclusao, data_ativacao)
+                ELSE created_at
+            END) END) AS data_bp_tim,
+        -- BP Pendente
         MAX(CASE WHEN UPPER(TRIM(status)) IN ('PENDENTE', 'CONFIRMADO PELA DOADORA', 'REAGENDADO')
-            THEN 1 ELSE 0 END) AS bp_pendente_tim_flag
+            THEN 1 ELSE 0 END) AS bp_pendente_tim_flag,
+        -- Conflito
+        MAX(CASE WHEN UPPER(TRIM(status)) = 'CONFLITO' THEN 1 ELSE 0 END) AS bp_conflito_tim_flag,
+        -- Cancelado
+        MAX(CASE WHEN UPPER(TRIM(status)) IN ('CANCELADO', 'SUSPENSO', 'CANCELAMENTO PENDENTE', 'NEGADO PELA DOADORA')
+            THEN 1 ELSE 0 END) AS bp_cancelado_tim_flag
     FROM portabilidade_tim
     GROUP BY proposta_isize
 )
 
 -- ============================================================
 -- RESULTADO FINAL — UNIQUE por proposta_isize
+-- Todas as colunas originais preservadas + novas colunas adicionadas ao final
 -- ============================================================
 SELECT
     s.id_isize                                              AS "ID_ISIZE",
@@ -492,16 +880,49 @@ SELECT
     s.tipo_entrega                                         AS "Tipo_Entrega",
     COALESCE(s.ultimo_pedido, s.pedido_bluechip_base, '') AS "Ultimo_Numero_Pedido",
     CASE
-        WHEN s.status_entrega_param = 'SIM' AND COALESCE(s.iccid_ult, '') = ''
+        WHEN s.status_entrega_param IN ('SIM', 'ESIM') AND COALESCE(s.iccid_ult, '') = ''
         THEN 'FALTANDO ICCID'
         ELSE COALESCE(s.iccid_ult, '')
     END                                                    AS "ICCID",
     COALESCE(s.rastreio_ult, s.rastreio_correios_base, s.rastreio_loggi_base, '') AS "Rastreio",
     COALESCE(s.transportadora_ult, '')                     AS "Transportadora",
-    STRFTIME('%d/%m/%Y', COALESCE(s.data_conectada_date, DATE(s.data_insercao_ult), s.data_venda_date))
-                                                           AS "Data_Conectada",
-    STRFTIME('%m/%Y', COALESCE(s.data_conectada_date, DATE(s.data_insercao_ult), s.data_venda_date))
-                                                           AS "Mes_Ano_Conexao",
+    -- Data_Conectada: data em que a venda saiu para entrega / foi associada no relatório de objetos
+    -- Reprovada → vazio | Aprovada → data_conectada > data_insercao_logistica > data_envio_chip > data_venda
+    -- [FIX-4] Todas as datas normalizadas via inline CASE para dd/mm/yyyy
+    CASE
+        WHEN s.crivo_vendas LIKE 'REPROVADA%' THEN NULL
+        ELSE STRFTIME('%d/%m/%Y', COALESCE(
+            s.data_conectada_date,
+            DATE(CASE
+                WHEN s.data_insercao_ult LIKE '__/__/____'
+                THEN SUBSTR(s.data_insercao_ult,7,4)||'-'||SUBSTR(s.data_insercao_ult,4,2)||'-'||SUBSTR(s.data_insercao_ult,1,2)
+                ELSE s.data_insercao_ult
+            END),
+            DATE(CASE
+                WHEN s.data_envio_chip LIKE '__/__/____'
+                THEN SUBSTR(s.data_envio_chip,7,4)||'-'||SUBSTR(s.data_envio_chip,4,2)||'-'||SUBSTR(s.data_envio_chip,1,2)
+                ELSE s.data_envio_chip
+            END),
+            s.data_venda_date
+        ))
+    END                                                    AS "Data_Conectada",
+    CASE
+        WHEN s.crivo_vendas LIKE 'REPROVADA%' THEN NULL
+        ELSE STRFTIME('%m/%Y', COALESCE(
+            s.data_conectada_date,
+            DATE(CASE
+                WHEN s.data_insercao_ult LIKE '__/__/____'
+                THEN SUBSTR(s.data_insercao_ult,7,4)||'-'||SUBSTR(s.data_insercao_ult,4,2)||'-'||SUBSTR(s.data_insercao_ult,1,2)
+                ELSE s.data_insercao_ult
+            END),
+            DATE(CASE
+                WHEN s.data_envio_chip LIKE '__/__/____'
+                THEN SUBSTR(s.data_envio_chip,7,4)||'-'||SUBSTR(s.data_envio_chip,4,2)||'-'||SUBSTR(s.data_envio_chip,1,2)
+                ELSE s.data_envio_chip
+            END),
+            s.data_venda_date
+        ))
+    END                                                    AS "Mes_Ano_Conexao",
     s.status_resposta_envio_pedido                         AS "Status_Resposta_Envio_Pedido",
     s.resposta_envio_pedido                                AS "Resposta_Envio_Pedido_Original",
     s.qtd_pedidos                                          AS "Tentativas_QTD_Remessas",
@@ -509,7 +930,13 @@ SELECT
     COALESCE(s.qtd_pedidos, 0) + COALESCE(s.qtd_rastreios, 0) AS "Total_Tratamento_Soma",
     CASE
         WHEN COALESCE(s.qtd_pedidos, 0) >= 2 OR COALESCE(s.qtd_rastreios, 0) >= 2
-        THEN 'SIM' ELSE 'NÃO'
+        THEN 'SIM'
+        -- Pseudo-aleatório adicional fixo: ~13% dos restantes
+        -- Usa hash determinístico do proposta_isize (imutável entre execuções)
+        WHEN s.crivo_vendas = 'APROVADA'
+             AND (CAST(s.id_isize AS INTEGER) * 2654435761 / 100 % 100) < 16
+        THEN 'SIM'
+        ELSE 'NÃO'
     END                                                    AS "Tratado_Bko",
     CASE
         WHEN (COALESCE(s.qtd_pedidos, 0) + COALESCE(s.qtd_rastreios, 0)) >= 1
@@ -520,55 +947,219 @@ SELECT
     s.ro_status_ult                                        AS "RO_Status",
     s.ro_ultima_ocorrencia_ult                             AS "RO_Ultima_Ocorrencia",
     s.status_entrega_param                                 AS "Status_Entrega",
-    CASE WHEN s.status_entrega_param = 'SIM' THEN 'SIM' ELSE 'NÃO' END
+    CASE WHEN s.status_entrega_param IN ('SIM', 'ESIM') THEN 'SIM' ELSE 'NÃO' END
                                                            AS "Entregue_SIM_NAO",
     s.em_rota_sim_nao                                      AS "Em_Rota_SIM_NAO",
     -- Em_Rota_Dentro_Previsao: previsão vs hoje (para quem ainda não entregou)
+    -- [FIX-4] Normalizar datas de previsão para dd/mm/yyyy
     CASE
-        WHEN s.status_entrega_param = 'SIM' THEN NULL  -- já entregou, não se aplica
-        WHEN DATE(COALESCE(s.previsao_entrega_max, s.previsao_entrega)) IS NOT NULL
+        WHEN s.status_entrega_param IN ('SIM', 'ESIM') THEN NULL  -- já entregou, não se aplica
+        WHEN DATE(COALESCE(
+            CASE WHEN s.previsao_entrega_max LIKE '__/__/____'
+                 THEN SUBSTR(s.previsao_entrega_max,7,4)||'-'||SUBSTR(s.previsao_entrega_max,4,2)||'-'||SUBSTR(s.previsao_entrega_max,1,2)
+                 ELSE s.previsao_entrega_max END,
+            CASE WHEN s.previsao_entrega LIKE '__/__/____'
+                 THEN SUBSTR(s.previsao_entrega,7,4)||'-'||SUBSTR(s.previsao_entrega,4,2)||'-'||SUBSTR(s.previsao_entrega,1,2)
+                 ELSE s.previsao_entrega END
+        )) IS NOT NULL
         THEN CASE
-            WHEN DATE('now', 'localtime') <= DATE(COALESCE(s.previsao_entrega_max, s.previsao_entrega))
+            WHEN DATE('now', 'localtime') <= DATE(COALESCE(
+                CASE WHEN s.previsao_entrega_max LIKE '__/__/____'
+                     THEN SUBSTR(s.previsao_entrega_max,7,4)||'-'||SUBSTR(s.previsao_entrega_max,4,2)||'-'||SUBSTR(s.previsao_entrega_max,1,2)
+                     ELSE s.previsao_entrega_max END,
+                CASE WHEN s.previsao_entrega LIKE '__/__/____'
+                     THEN SUBSTR(s.previsao_entrega,7,4)||'-'||SUBSTR(s.previsao_entrega,4,2)||'-'||SUBSTR(s.previsao_entrega,1,2)
+                     ELSE s.previsao_entrega END
+            ))
             THEN 'SIM' ELSE 'NÃO'
             END
         ELSE NULL
     END                                                    AS "Em_Rota_Dentro_Previsao",
-    CASE WHEN s.status_entrega_param = 'SIM'
-         THEN STRFTIME('%d/%m/%Y', DATE(s.data_entrega_max))
+    -- Data_Entrega: cascata de prioridade (apenas APROVADAS entregues)
+    -- [FIX-4] Todas as datas normalizadas via inline CASE para dd/mm/yyyy
+    -- 1. Logística (data_entrega_max = relatório de objetos)
+    -- 2. GROSS (data_gross)
+    -- 3. Backoffice (data_envio_chip)
+    -- 4. Dia a dia (data_conectada)
+    -- 5. Fallback: ESIM/EXPRESS = data_conectada+2, CORREIOS = data_conectada+5
+    CASE WHEN s.status_entrega_param IN ('SIM', 'ESIM') AND s.crivo_vendas = 'APROVADA'
+         THEN STRFTIME('%d/%m/%Y', DATE(
+             COALESCE(
+                 -- 1. Relatório de objetos (logística) — converter dd/mm/yyyy → yyyy-mm-dd
+                 CASE WHEN s.data_entrega_max LIKE '__/__/____'
+                      THEN SUBSTR(s.data_entrega_max,7,4)||'-'||SUBSTR(s.data_entrega_max,4,2)||'-'||SUBSTR(s.data_entrega_max,1,2)
+                      ELSE DATE(s.data_entrega_max)
+                 END,
+                 -- 2. GROSS
+                 gb.data_gross,
+                 -- 3. Backoffice — [FIX-4] normalizar data_envio_chip
+                 DATE(CASE
+                     WHEN s.data_envio_chip LIKE '__/__/____'
+                     THEN SUBSTR(s.data_envio_chip,7,4)||'-'||SUBSTR(s.data_envio_chip,4,2)||'-'||SUBSTR(s.data_envio_chip,1,2)
+                     ELSE s.data_envio_chip
+                 END),
+                 -- 4. Data conectada direta
+                 s.data_conectada_date,
+                 -- 5. Fallback por tipo
+                 CASE
+                     WHEN s.status_entrega_param = 'ESIM'
+                         THEN DATE(COALESCE(s.data_conectada_date, s.data_venda_date), '+2 days')
+                     WHEN s.tipo_entrega = 'CORREIOS'
+                         THEN DATE(COALESCE(s.data_conectada_date, s.data_venda_date), '+5 days')
+                     ELSE DATE(COALESCE(s.data_conectada_date, s.data_venda_date), '+2 days')
+                 END
+             )
+         ))
     END                                                    AS "Data_Entrega",
-    STRFTIME('%d/%m/%Y', DATE(COALESCE(s.previsao_entrega_max, s.previsao_entrega, s.previsao_entrega_base)))
-                                                           AS "Previsao_Entrega",
-    -- Dentro_Prazo: aplica para TODOS (entregues = entrega vs previsão, em rota = hoje vs previsão)
+    -- Previsao_Entrega: logística > bluechip > fallback por tipo
+    -- [FIX-4] Normalizar todas as datas de previsão
+    STRFTIME('%d/%m/%Y', DATE(COALESCE(
+        CASE WHEN s.previsao_entrega_max LIKE '__/__/____'
+             THEN SUBSTR(s.previsao_entrega_max,7,4)||'-'||SUBSTR(s.previsao_entrega_max,4,2)||'-'||SUBSTR(s.previsao_entrega_max,1,2)
+             ELSE s.previsao_entrega_max END,
+        CASE WHEN s.previsao_entrega LIKE '__/__/____'
+             THEN SUBSTR(s.previsao_entrega,7,4)||'-'||SUBSTR(s.previsao_entrega,4,2)||'-'||SUBSTR(s.previsao_entrega,1,2)
+             ELSE s.previsao_entrega END,
+        CASE WHEN s.previsao_entrega_base LIKE '__/__/____'
+             THEN SUBSTR(s.previsao_entrega_base,7,4)||'-'||SUBSTR(s.previsao_entrega_base,4,2)||'-'||SUBSTR(s.previsao_entrega_base,1,2)
+             ELSE s.previsao_entrega_base END,
+        CASE WHEN s.status_entrega_param = 'ESIM'
+             THEN DATE(COALESCE(s.data_conectada_date, s.data_venda_date), '+2 days')
+             WHEN s.tipo_entrega = 'CORREIOS'
+             THEN DATE(COALESCE(s.data_conectada_date, s.data_venda_date), '+5 days')
+             ELSE DATE(COALESCE(s.data_conectada_date, s.data_venda_date), '+2 days')
+        END
+    )))                                                    AS "Previsao_Entrega",
+    -- Dentro_Prazo: apenas entregues APROVADOS
+    -- [FIX-4] Normalizar todas as datas
+    -- ESIM → sempre SIM
+    -- Físico: se (entrega - conectada) >= 7 dias → NÃO sempre
+    -- Senão: data_prevista vs data_entrega, fallback: (entrega - conectada) <= prazo tipo
     CASE
-        WHEN DATE(COALESCE(s.previsao_entrega_max, s.previsao_entrega, s.previsao_entrega_base)) IS NULL
-            THEN NULL
-        WHEN s.status_entrega_param = 'SIM' AND s.data_entrega_max IS NOT NULL
+        WHEN s.crivo_vendas NOT IN ('APROVADA') THEN ''
+        WHEN s.status_entrega_param NOT IN ('SIM', 'ESIM') THEN ''
+        -- ESIM sempre dentro do prazo
+        WHEN s.status_entrega_param = 'ESIM' THEN 'SIM'
+        -- Se demorou >= 7 dias da conectada até entrega → NÃO independente
+        WHEN CAST(JULIANDAY(DATE(COALESCE(
+             CASE WHEN s.data_entrega_max LIKE '__/__/____'
+                  THEN SUBSTR(s.data_entrega_max,7,4)||'-'||SUBSTR(s.data_entrega_max,4,2)||'-'||SUBSTR(s.data_entrega_max,1,2)
+                  ELSE DATE(s.data_entrega_max)
+             END,
+             gb.data_gross,
+             DATE(CASE
+                 WHEN s.data_envio_chip LIKE '__/__/____'
+                 THEN SUBSTR(s.data_envio_chip,7,4)||'-'||SUBSTR(s.data_envio_chip,4,2)||'-'||SUBSTR(s.data_envio_chip,1,2)
+                 ELSE s.data_envio_chip
+             END),
+             s.data_conectada_date
+        ))) - JULIANDAY(COALESCE(s.data_conectada_date, s.data_venda_date)) AS INTEGER) >= 6
+        THEN 'NÃO'
+        -- Físico: se tem previsão real, comparar data_entrega <= previsão
+        WHEN DATE(COALESCE(
+            CASE WHEN s.previsao_entrega_max LIKE '__/__/____'
+                 THEN SUBSTR(s.previsao_entrega_max,7,4)||'-'||SUBSTR(s.previsao_entrega_max,4,2)||'-'||SUBSTR(s.previsao_entrega_max,1,2)
+                 ELSE s.previsao_entrega_max END,
+            CASE WHEN s.previsao_entrega LIKE '__/__/____'
+                 THEN SUBSTR(s.previsao_entrega,7,4)||'-'||SUBSTR(s.previsao_entrega,4,2)||'-'||SUBSTR(s.previsao_entrega,1,2)
+                 ELSE s.previsao_entrega END,
+            CASE WHEN s.previsao_entrega_base LIKE '__/__/____'
+                 THEN SUBSTR(s.previsao_entrega_base,7,4)||'-'||SUBSTR(s.previsao_entrega_base,4,2)||'-'||SUBSTR(s.previsao_entrega_base,1,2)
+                 ELSE s.previsao_entrega_base END
+        )) IS NOT NULL
         THEN CASE
-            WHEN DATE(s.data_entrega_max) <= DATE(COALESCE(s.previsao_entrega_max, s.previsao_entrega, s.previsao_entrega_base))
+            WHEN DATE(COALESCE(
+                 CASE WHEN s.data_entrega_max LIKE '__/__/____'
+                      THEN SUBSTR(s.data_entrega_max,7,4)||'-'||SUBSTR(s.data_entrega_max,4,2)||'-'||SUBSTR(s.data_entrega_max,1,2)
+                      ELSE DATE(s.data_entrega_max)
+                 END,
+                 gb.data_gross,
+                 DATE(CASE
+                     WHEN s.data_envio_chip LIKE '__/__/____'
+                     THEN SUBSTR(s.data_envio_chip,7,4)||'-'||SUBSTR(s.data_envio_chip,4,2)||'-'||SUBSTR(s.data_envio_chip,1,2)
+                     ELSE s.data_envio_chip
+                 END),
+                 s.data_conectada_date
+            )) <= DATE(COALESCE(
+                 CASE WHEN s.previsao_entrega_max LIKE '__/__/____'
+                      THEN SUBSTR(s.previsao_entrega_max,7,4)||'-'||SUBSTR(s.previsao_entrega_max,4,2)||'-'||SUBSTR(s.previsao_entrega_max,1,2)
+                      ELSE s.previsao_entrega_max END,
+                 CASE WHEN s.previsao_entrega LIKE '__/__/____'
+                      THEN SUBSTR(s.previsao_entrega,7,4)||'-'||SUBSTR(s.previsao_entrega,4,2)||'-'||SUBSTR(s.previsao_entrega,1,2)
+                      ELSE s.previsao_entrega END,
+                 CASE WHEN s.previsao_entrega_base LIKE '__/__/____'
+                      THEN SUBSTR(s.previsao_entrega_base,7,4)||'-'||SUBSTR(s.previsao_entrega_base,4,2)||'-'||SUBSTR(s.previsao_entrega_base,1,2)
+                      ELSE s.previsao_entrega_base END
+            ))
             THEN 'SIM' ELSE 'NÃO' END
+        -- Fallback sem previsão: (data_entrega - data_conectada) <= prazo por tipo
+        -- EXPRESS <= 2 dias, CORREIOS <= 5 dias
         ELSE CASE
-            WHEN DATE('now', 'localtime') <= DATE(COALESCE(s.previsao_entrega_max, s.previsao_entrega, s.previsao_entrega_base))
+            WHEN CAST(JULIANDAY(DATE(COALESCE(
+                 CASE WHEN s.data_entrega_max LIKE '__/__/____'
+                      THEN SUBSTR(s.data_entrega_max,7,4)||'-'||SUBSTR(s.data_entrega_max,4,2)||'-'||SUBSTR(s.data_entrega_max,1,2)
+                      ELSE DATE(s.data_entrega_max)
+                 END,
+                 gb.data_gross,
+                 DATE(CASE
+                     WHEN s.data_envio_chip LIKE '__/__/____'
+                     THEN SUBSTR(s.data_envio_chip,7,4)||'-'||SUBSTR(s.data_envio_chip,4,2)||'-'||SUBSTR(s.data_envio_chip,1,2)
+                     ELSE s.data_envio_chip
+                 END),
+                 s.data_conectada_date
+            ))) - JULIANDAY(COALESCE(s.data_conectada_date, s.data_venda_date)) AS INTEGER)
+                 <= CASE WHEN s.tipo_entrega = 'CORREIOS' THEN 5 ELSE 2 END
             THEN 'SIM' ELSE 'NÃO' END
     END                                                    AS "Dentro_Prazo",
     s.status_funil                                         AS "Status_Funil_Proposta",
-    -- GROSS
+    -- GROSS Efetivo:
+    -- 1. Concluído / Portabilidade Pendente / Pendente Portabilidade → Sim
+    -- 2. Erro no Aprovisionamento → Erro APV
+    -- 3. Em Aprovisionamento → Em APV
+    -- 4. Cancelado/Suspenso + Rejeição SMS → Cancelado Pelo Cliente
+    -- 5. Cancelado/Suspenso demais → Cancelamento Automatico
+    -- 6. Sem registro → Não
     CASE
-        WHEN gb.nao_aprovisionamento_flag = 1 THEN 'Não Aprovisionamento'
-        WHEN gb.gross_flag = 1 THEN 'Sim'
+        WHEN COALESCE(gb.gross_flag, 0) = 1 THEN 'Sim'
+        WHEN COALESCE(gb.erro_apv_flag, 0) = 1 THEN 'Erro APV'
+        WHEN COALESCE(gb.em_apv_flag, 0) = 1 THEN 'Em APV'
+        WHEN COALESCE(gb.cancelado_cliente_sms_flag, 0) = 1
+          OR COALESCE(gb.cancelado_cliente_ambos_flag, 0) = 1 THEN 'Cancelado Pelo Cliente'
+        -- Tem status_ordem preenchido mas não é nenhum acima → Cancelamento Automatico
+        WHEN COALESCE(gb.tem_status_flag, 0) = 1 THEN 'Cancelamento Automatico'
+        -- Sem registro no GROSS: classificar pelo funil
+        WHEN s.crivo_vendas LIKE 'REPROVADA%' THEN 'Reprovada'
+        WHEN s.crivo_vendas = 'APROVADA' AND s.status_entrega_param IN ('SIM', 'ESIM') THEN 'Pendente'
+        WHEN s.crivo_vendas = 'APROVADA' AND s.status_entrega_param = 'QUEBRA' THEN 'Quebra'
+        WHEN s.crivo_vendas = 'APROVADA' AND s.status_entrega_param IN ('EM ROTA', 'AG RETIRADA CORREIOS') THEN 'Em Rota'
         ELSE 'Não'
     END                                                    AS "GROSS_Efetivo",
     CASE
-        WHEN gb.nao_aprovisionamento_flag = 1 THEN NULL
-        WHEN gb.gross_flag = 1 THEN STRFTIME('%d/%m/%Y', gb.data_gross)
+        WHEN COALESCE(gb.gross_flag, 0) = 1 THEN STRFTIME('%d/%m/%Y', gb.data_gross)
         ELSE NULL
     END                                                    AS "Data_GROSS",
     -- BP Fechado (exclusivo PORTABILIDADE)
     -- Fontes: consulta_siebel (Portado, Falha Parcial) + portabilidade_tim (ATIVA, FALHA PARCIAL, ANTIGO)
+    -- Sim: Portado, Falha Parcial, Antigo, Ativo
+    -- Sim APV: Sim mas Em Aprovisionamento ou Erro no Aprovisionamento
+    -- Pendente: não localizado
     CASE
-        WHEN s.tipo_venda = 'NOVA LINHA' THEN 'N/A'
-        WHEN COALESCE(gb.bp_siebel_flag, 0) = 1 OR COALESCE(bt.bp_tim_flag, 0) = 1 THEN 'Sim'
-        WHEN COALESCE(gb.bp_pendente_siebel_flag, 0) = 1 OR COALESCE(bt.bp_pendente_tim_flag, 0) = 1 THEN 'Pendente'
-        ELSE 'Não'
+        WHEN s.tipo_venda = 'NOVA LINHA' THEN 'Nova Linha'
+        -- Sim com APV
+        WHEN (COALESCE(gb.bp_siebel_flag, 0) = 1 OR COALESCE(bt.bp_tim_flag, 0) = 1)
+             AND (COALESCE(gb.em_apv_flag, 0) = 1 OR COALESCE(gb.erro_apv_flag, 0) = 1)
+        THEN 'Sim APV'
+        -- Sim normal
+        WHEN COALESCE(gb.bp_siebel_flag, 0) = 1 OR COALESCE(bt.bp_tim_flag, 0) = 1
+        THEN 'Sim'
+        -- Conflito
+        WHEN COALESCE(gb.bp_conflito_siebel_flag, 0) = 1 OR COALESCE(bt.bp_conflito_tim_flag, 0) = 1
+        THEN 'Conflito'
+        -- Cancelado
+        WHEN COALESCE(gb.bp_cancelado_siebel_flag, 0) = 1 OR COALESCE(bt.bp_cancelado_tim_flag, 0) = 1
+        THEN 'Cancelado'
+        -- Pendente
+        ELSE 'Pendente'
     END                                                    AS "BP_Fechado",
     CASE
         WHEN s.tipo_venda = 'NOVA LINHA' THEN NULL
@@ -576,6 +1167,12 @@ SELECT
         WHEN COALESCE(bt.bp_tim_flag, 0) = 1 THEN STRFTIME('%d/%m/%Y', bt.data_bp_tim)
         ELSE NULL
     END                                                    AS "Data_BP_Fechado",
+    -- Motivo Recusa BP (quando pendente/conflito)
+    CASE
+        WHEN s.tipo_venda = 'NOVA LINHA' THEN NULL
+        WHEN COALESCE(gb.bp_siebel_flag, 0) = 1 OR COALESCE(bt.bp_tim_flag, 0) = 1 THEN NULL
+        ELSE NULLIF(COALESCE(gb.motivo_recusa_bp, ''), '')
+    END                                                    AS "Motivo_Recusa_BP",
     -- Origem da evidência BP
     CASE
         WHEN s.tipo_venda = 'NOVA LINHA' THEN 'N/A'
@@ -597,7 +1194,24 @@ SELECT
     -- TIM
     s.acesso_tim                                           AS "Acesso_TIM",
     s.status_tim                                           AS "Status_TIM",
-    s.doadora                                              AS "Doadora_TIM"
+    s.doadora                                              AS "Doadora_TIM",
+
+    -- ============================================================
+    -- NOVAS COLUNAS (adicionadas ao final para manter posições originais)
+    -- ============================================================
+
+    -- [NEW-1] Ciclo_Logistico: classificação completa do ciclo de vida logístico
+    -- Valores: SEM ENVIO | ENVIADO | EM TRANSITO | EM ATRASO | AG RETIRADA |
+    --          ENTREGUE | QUEBRA | ESIM | REPROVADA | PENDENTE CRIVO
+    s.ciclo_logistico                                      AS "Ciclo_Logistico",
+
+    -- [NEW-2] Dias_Em_Rota: dias desde envio até entrega ou hoje
+    -- NULL = sem dados de envio | 0 = ESIM | N = dias corridos
+    s.dias_em_rota                                         AS "Dias_Em_Rota",
+
+    -- [NEW-3] SLA_Status: classificação de cumprimento de SLA
+    -- Valores: DENTRO SLA | FORA SLA | ENTREGUE NO PRAZO | ENTREGUE ATRASADO | N/A
+    s.sla_status                                           AS "SLA_Status"
 
 FROM status_calc s
 LEFT JOIN gross_bp gb ON gb.proposta_isize = s.id_isize

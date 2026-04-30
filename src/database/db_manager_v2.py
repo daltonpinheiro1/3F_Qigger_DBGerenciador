@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.database.schema import criar_schema
+from src.database.schema import criar_schema, migrar_lotes_importacao_check
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,9 @@ BUSINESS_KEYS: Dict[str, List[str]] = {
     'servicos_adicionais': ['proposta_isize'],
     'robo_processamento': ['proposta_isize'],
     'decisoes': ['proposta_isize', 'regra_id'],
+    'vendas_eva': ['numero_acesso'],
+    'retornos_rpa_tim': ['numero_acesso'],
+    'auditoria_vendas_tim': ['numero_acesso'],
 }
 
 
@@ -51,6 +54,7 @@ class DatabaseManagerV2:
 
         with self._get_connection() as conn:
             criar_schema(conn)
+            migrar_lotes_importacao_check(conn)
             self._apply_pragmas(conn)
 
         logger.info("DatabaseManagerV2 inicializado: %s", db_path)
@@ -127,8 +131,17 @@ class DatabaseManagerV2:
             cursor = conn.cursor()
 
             # Buscar versão máxima para a combinação de chave de negócio
-            where_clause = " AND ".join(f"{col} = ?" for col in key_cols)
-            key_values = [dados[col] for col in key_cols]
+            # Tratar NULL: usar IS NULL para valores None, = ? para valores reais
+            where_parts = []
+            key_values = []
+            for col in key_cols:
+                val = dados.get(col)
+                if val is None:
+                    where_parts.append(f"{col} IS NULL")
+                else:
+                    where_parts.append(f"{col} = ?")
+                    key_values.append(val)
+            where_clause = " AND ".join(where_parts)
 
             cursor.execute(
                 f"SELECT MAX(versao) FROM {tabela} WHERE {where_clause}",

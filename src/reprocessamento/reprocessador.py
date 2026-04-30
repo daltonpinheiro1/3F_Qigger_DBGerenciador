@@ -26,7 +26,7 @@ class ReprocessadorEndereco:
     def __init__(
         self,
         db_v2_path: str,
-        periodo_dias: int = 180,
+        periodo_dias: int = 90,
         diretorio_saida: str = None,
         config_proxies: Union[str, List[str], None] = None,
         workers: int = 4,
