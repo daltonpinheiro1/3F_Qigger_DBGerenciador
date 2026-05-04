@@ -840,38 +840,14 @@ def substituir_variaveis_mensagem(corpo_mensagem: str, variaveis: Dict[str, str]
 
 # Mensagens padrão dos templates (caso não estejam no banco)
 MENSAGENS_PADRAO = {
-    1: """Olá. A sua solicitação de portabilidade para a TIM foi processada com sucesso.
-Para autorizar o envio do chip e a continuidade do processo, é necessária a confirmação do titular.
-Realize a validação de uma das formas abaixo:
-1. Toque no botão Confirmar Solicitação; ou
-2. Envie SMS com a palavra SIM para o número 7678.
-Dados da Entrega:
-* Prazo estimado: Até 10 dias úteis.
-* Recebimento: Necessário maior de 18 anos com documento.
-* Observação: O chip será entregue com número provisório até a conclusão da portabilidade.
-Status: Aguardando confirmação.""",
-    2: """Olá. Verificamos uma pendência na etapa de validação da sua portabilidade numérica.
-Para concluir o processo técnico de transferência da linha, é necessário o envio do comando de confirmação via SMS a partir do seu chip atual.
-Instruções para regularização:
-1. Envie a palavra PORTABILIDADE para o número 7678; ou
-2. Utilize o atalho no botão abaixo para gerar o SMS automaticamente.
-O não envio do comando pode ocasionar a suspensão da solicitação.
-Status: Aguardando validação via SMS.""",
-    3: """Olá, {{1}}. O seu pedido encontra-se disponível para retirada.
-Para concluir a entrega, compareça à agência dos Correios indicada portando documento de identificação original com foto.
-Status Atual: Objeto aguardando retirada
-Código de Rastreio: {{2}}
-Utilize o botão abaixo para consultar o endereço exato da agência.""",
-    4: """Olá, {{1}}. A portabilidade da sua linha foi processada.
-Para iniciarmos a logística de entrega do chip, valide se o endereço cadastrado está atualizado:
-Endereço de Destino:
-Rua: {{2}}, Nº {{3}}; Complemento: {{4}};
-Bairro: {{5}}
-Cidade: {{6}}
-UF: {{7}};
-CEP: {{8}}.
-Ponto de Referência: {{9}};
-A exatidão dos dados é essencial para evitar devoluções. O endereço acima está correto?""",
+    1: """Olá! A sua solicitação de portabilidade para a TIM foi processada com sucesso.  Para autorizar o envio do chip e a continuidade do processo, é necessária a confirmação do titular.  Realize a validação de uma das formas abaixo:  Toque no botão Confirmar Solicitação; ou Envie SMS com a palavra SIM para o número 7678.  Dados da Entrega:  Prazo estimado: Até 10 dias úteis. Recebimento: Necessário maior de 18 anos com documento. Observação: O chip será entregue com número provisório até a conclusão da portabilidade.  Status: Aguardando confirmação.""",
+    2: """Olá. Verificamos uma pendência na etapa de validação da sua portabilidade numérica. Para concluir o processo técnico de transferência da linha, é necessário o envio do comando de confirmação via SMS a partir do seu chip atual. Instruções para regularização: 1. Envie a palavra PORTABILIDADE para o número 7678; ou 2. Utilize o atalho no botão abaixo para gerar o SMS automaticamente. O não envio do comando pode ocasionar a suspensão da solicitação. Status: Aguardando validação via SMS.""",
+    3: """Olá, {{1}}. O seu pedido encontra-se disponível para retirada.  Para concluir a entrega, compareça à agência dos Correios indicada portando documento de identificação original com foto.  Status Atual: Objeto aguardando retirada Código de Rastreio: {{2}}  Utilize o botão abaixo para consultar o endereço exato da agência.""",
+    4: """Olá, {{1}}. A portabilidade da sua linha foi processada.  Para iniciarmos a logística de entrega do chip, valide se o endereço cadastrado está atualizado:  Endereço de Destino: Rua: {{2}}, Nº {{3}}; Complemento: {{4}}; Bairro: {{5}} Cidade: {{6}} UF: {{7}}; CEP: {{8}}. Ponto de Referência: {{9}};  A exatidão dos dados é essencial para evitar devoluções. O endereço acima está correto?""",
+    5: """Olá, {{1}}. Identificamos uma pendência na validação da sua portabilidade numérica. Para continuar o processo, confirme a solicitação pelo chip atual:  Instruções para regularização: 1. Envie a palavra SIM para o número 7678; ou 2. Utilize o atalho no botão abaixo para gerar o SMS automaticamente.  Status atual: aguardando validação via SMS.""",
+    6: """Olá, {{1}}.  Sua portabilidade para a TIM foi concluída com sucesso e sua linha já está ativa. Se precisar de suporte ou consultar informações da sua linha, responda essa mensagem e fale com um de nossos especialistas.""",
+    7: """Olá, {{1}}. Identificamos que o seu chip TIM já foi entregue, mas ainda não houve ativação.  Para concluir o processo: 1. insira o chip no celular; 2. desligue e ligue o aparelho; 3. aguarde a rede TIM aparecer.  Se precisar de ajuda, responda essa mensagem e fale com nosso especialistas.""",
+    8: """Olá, {{1}}.  Seu chip TIM saiu para entrega. Acompanhe o envio pelo link abaixo: {{2}}  Quando receber o chip, insira-o no aparelho e reinicie o celular. A ativação da rede pode levar até 24 horas. Para realizar a confirmação 7678 Click no botão abaixo, e siga as instruções.""",
 }
 
 def obter_corpo_mensagem_template(db_manager: DatabaseManager, template_id: int) -> str:

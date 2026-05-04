@@ -1,13 +1,17 @@
 """
 Templates de Mensagens WhatsApp - Mapeamento e Geração de Variáveis
-Versão 1.0 - Integração com Régua de Comunicação
+Versão 2.0 - Régua de Comunicação atualizada
 
 Referência dos Templates:
-ID | Nome_modelo                    | Uso
-1  | confirma_portabilidade_v1      | Confirmação de portabilidade processada
-2  | pendencia_sms_portabilidade    | Pendência de validação SMS
-3  | aviso_retirada_correios_v1     | Chip aguardando retirada nos Correios
-4  | confirmacao_endereco_v1        | Confirmação de endereço de entrega
+ID | Nome_modelo                         | Uso
+1  | confirma_portabilidade_v2           | Portabilidade processada, aguardando confirmação
+2  | pendencia_sms_portabilidade_v2      | Pendência de validação SMS
+3  | aviso_retirada_correios_v2          | Chip aguardando retirada nos Correios
+4  | confirmacao_endereco_v2             | Confirmação de endereço de entrega
+5  | pendencia_sms_v2                    | Pendência SMS alternativa (SIM para 7678)
+6  | portabilidade_concluida_v2          | Portabilidade concluída, linha ativa
+7  | chip_entregue_sem_ativacao_v2       | Chip entregue mas não ativado
+8  | chip_saiu_entrega_v2                | Chip saiu para entrega com rastreio
 """
 import logging
 from typing import Optional, Dict, List, Any
@@ -23,6 +27,10 @@ class TemplateID(Enum):
     PENDENCIA_SMS_PORTABILIDADE = 2
     AVISO_RETIRADA_CORREIOS = 3
     CONFIRMACAO_ENDERECO = 4
+    PENDENCIA_SMS_V2 = 5
+    PORTABILIDADE_CONCLUIDA = 6
+    CHIP_ENTREGUE_SEM_ATIVACAO = 7
+    CHIP_SAIU_ENTREGA = 8
 
 
 @dataclass
@@ -36,43 +44,71 @@ class TemplateConfig:
     tem_botao: bool
     botao_url: Optional[str] = None
     botao_texto: Optional[str] = None
+    corpo_mensagem: Optional[str] = None
 
 
 # Configuração completa dos templates
 TEMPLATES: Dict[int, TemplateConfig] = {
     1: TemplateConfig(
         id=1,
-        nome_modelo="confirma_portabilidade_v1",
+        nome_modelo="confirma_portabilidade_v2",
         categoria="Utilidade / Atualização de Pedido",
         cabecalho="Atualização de Solicitação",
         variaveis=[],  # Sem variáveis dinâmicas
         tem_botao=True,
         botao_texto="Confirmar Solicitação",
-        botao_url="https://tinyurl.com/portsim"
+        botao_url="https://tinyurl.com/portsim",
+        corpo_mensagem=(
+            "Olá! A sua solicitação de portabilidade para a TIM foi processada com sucesso. "
+            " Para autorizar o envio do chip e a continuidade do processo, é necessária a confirmação do titular. "
+            " Realize a validação de uma das formas abaixo: "
+            " Toque no botão Confirmar Solicitação; ou Envie SMS com a palavra SIM para o número 7678. "
+            " Dados da Entrega: "
+            " Prazo estimado: Até 10 dias úteis. Recebimento: Necessário maior de 18 anos com documento. "
+            "Observação: O chip será entregue com número provisório até a conclusão da portabilidade. "
+            " Status: Aguardando confirmação."
+        ),
     ),
     2: TemplateConfig(
         id=2,
-        nome_modelo="pendencia_sms_portabilidade",
+        nome_modelo="pendencia_sms_portabilidade_v2",
         categoria="Utilidade / Atualização de Conta",
         cabecalho="Aviso de Pendência Técnica",
         variaveis=[],  # Sem variáveis dinâmicas
         tem_botao=True,
         botao_texto="Gerar SMS de Validação",
-        botao_url="https://tinyurl.com/portsim"
+        botao_url="https://tinyurl.com/portsim",
+        corpo_mensagem=(
+            "Olá. Verificamos uma pendência na etapa de validação da sua portabilidade numérica. "
+            "Para concluir o processo técnico de transferência da linha, é necessário o envio do comando de confirmação "
+            "via SMS a partir do seu chip atual. "
+            "Instruções para regularização: "
+            "1. Envie a palavra PORTABILIDADE para o número 7678; ou "
+            "2. Utilize o atalho no botão abaixo para gerar o SMS automaticamente. "
+            "O não envio do comando pode ocasionar a suspensão da solicitação. "
+            "Status: Aguardando validação via SMS."
+        ),
     ),
     3: TemplateConfig(
         id=3,
-        nome_modelo="aviso_retirada_correios_v1",
+        nome_modelo="aviso_retirada_correios_v2",
         categoria="Utilidade / Atualização de Conta",
         cabecalho="Atualização Logística",
         variaveis=["nome_cliente", "cod_rastreio"],  # {{1}} = nome, {{2}} = rastreio
         tem_botao=True,
         botao_texto="Ver Endereço da Agência",
-        botao_url="https://rastreamento.correios.com.br/app/index.php"
+        botao_url="https://rastreamento.correios.com.br/app/index.php",
+        corpo_mensagem=(
+            "Olá, {{1}}. O seu pedido encontra-se disponível para retirada. "
+            " Para concluir a entrega, compareça à agência dos Correios indicada portando documento de identificação "
+            "original com foto. "
+            " Status Atual: Objeto aguardando retirada Código de Rastreio: {{2}} "
+            " Utilize o botão abaixo para consultar o endereço exato da agência."
+        ),
     ),
     4: TemplateConfig(
         id=4,
-        nome_modelo="confirmacao_endereco_v1",
+        nome_modelo="confirmacao_endereco_v2",
         categoria="Utilidade / Atualização de Conta",
         cabecalho="Conferência de Dados de Entrega",
         variaveis=[
@@ -86,37 +122,120 @@ TEMPLATES: Dict[int, TemplateConfig] = {
             "cep",               # {{8}} = CEP
             "ponto_referencia"   # {{9}} = ponto de referência
         ],
-        tem_botao=False
+        tem_botao=False,
+        corpo_mensagem=(
+            "Olá, {{1}}. A portabilidade da sua linha foi processada. "
+            " Para iniciarmos a logística de entrega do chip, valide se o endereço cadastrado está atualizado: "
+            " Endereço de Destino: Rua: {{2}}, Nº {{3}}; Complemento: {{4}}; Bairro: {{5}} "
+            "Cidade: {{6}} UF: {{7}}; CEP: {{8}}. Ponto de Referência: {{9}}; "
+            " A exatidão dos dados é essencial para evitar devoluções. O endereço acima está correto?"
+        ),
+    ),
+    5: TemplateConfig(
+        id=5,
+        nome_modelo="pendencia_sms_v2",
+        categoria="Utilidade / Atualização de Conta",
+        cabecalho="Aviso de Pendência Técnica",
+        variaveis=["nome_cliente"],  # {{1}} = nome
+        tem_botao=True,
+        botao_texto="Gerar SMS de Validação",
+        botao_url="https://tinyurl.com/portsim",
+        corpo_mensagem=(
+            "Olá, {{1}}. Identificamos uma pendência na validação da sua portabilidade numérica. "
+            "Para continuar o processo, confirme a solicitação pelo chip atual: "
+            " Instruções para regularização: "
+            "1. Envie a palavra SIM para o número 7678; ou "
+            "2. Utilize o atalho no botão abaixo para gerar o SMS automaticamente. "
+            " Status atual: aguardando validação via SMS."
+        ),
+    ),
+    6: TemplateConfig(
+        id=6,
+        nome_modelo="portabilidade_concluida_v2",
+        categoria="Utilidade / Atualização de Conta",
+        cabecalho="Portabilidade Concluída",
+        variaveis=["nome_cliente"],  # {{1}} = nome
+        tem_botao=False,
+        corpo_mensagem=(
+            "Olá, {{1}}. "
+            " Sua portabilidade para a TIM foi concluída com sucesso e sua linha já está ativa. "
+            "Se precisar de suporte ou consultar informações da sua linha, responda essa mensagem e fale com um de "
+            "nossos especialistas."
+        ),
+    ),
+    7: TemplateConfig(
+        id=7,
+        nome_modelo="chip_entregue_sem_ativacao_v2",
+        categoria="Utilidade / Atualização de Conta",
+        cabecalho="Ativação do Chip",
+        variaveis=["nome_cliente"],  # {{1}} = nome
+        tem_botao=False,
+        corpo_mensagem=(
+            "Olá, {{1}}. Identificamos que o seu chip TIM já foi entregue, mas ainda não houve ativação. "
+            " Para concluir o processo: "
+            "1. insira o chip no celular; "
+            "2. desligue e ligue o aparelho; "
+            "3. aguarde a rede TIM aparecer. "
+            " Se precisar de ajuda, responda essa mensagem e fale com nosso especialistas."
+        ),
+    ),
+    8: TemplateConfig(
+        id=8,
+        nome_modelo="chip_saiu_entrega_v2",
+        categoria="Utilidade / Atualização de Conta",
+        cabecalho="Chip em Rota de Entrega",
+        variaveis=["nome_cliente", "cod_rastreio"],  # {{1}} = nome, {{2}} = link rastreio
+        tem_botao=True,
+        botao_texto="Confirmar 7678",
+        botao_url="https://tinyurl.com/portsim",
+        corpo_mensagem=(
+            "Olá, {{1}}. "
+            " Seu chip TIM saiu para entrega. Acompanhe o envio pelo link abaixo: {{2}} "
+            " Quando receber o chip, insira-o no aparelho e reinicie o celular. "
+            "A ativação da rede pode levar até 24 horas. "
+            "Para realizar a confirmação 7678 Click no botão abaixo, e siga as instruções."
+        ),
     ),
 }
 
 
 # Mapeamento de Tipo de Comunicação/Template para Template WPP
-# Baseado nos valores do triggers.xlsx
+# Baseado nos valores do triggers.xlsx e IDCorpo da régua
 TIPO_COMUNICACAO_PARA_TEMPLATE: Dict[str, int] = {
+    # Por IDCorpo (campo da régua de comunicação)
+    "1": 1,   # Confirmação portabilidade processada
+    "2": 2,   # Pendência validação SMS (PORTABILIDADE para 7678)
+    "3": 3,   # Chip aguardando retirada nos Correios
+    "4": 4,   # Confirmação de endereço de entrega
+    "5": 5,   # Pendência SMS alternativa (SIM para 7678)
+    "6": 6,   # Portabilidade concluída, linha ativa
+    "7": 7,   # Chip entregue mas não ativado
+    "8": 8,   # Chip saiu para entrega com rastreio
+
     # Por Tipo de Mensagem (campo Tipo_Mensagem do triggers)
-    "CONFIRMACAO BP": 1,           # -> confirma_portabilidade_v1
-    "LIBERACAO BONUS": 1,          # -> confirma_portabilidade_v1
-    "PENDENTE": 2,                 # -> pendencia_sms_portabilidade
-    
-    # Por Template do triggers.xlsx (campo Template)
-    "1": 1,   # Template 1 do triggers -> confirma_portabilidade_v1
-    "2": 1,   # Template 2 do triggers -> confirma_portabilidade_v1
-    
-    # Tipos de comunicação numéricos (sistema anterior)
-    "3": 1,   # Portabilidade Concluída -> confirma_portabilidade_v1
-    "5": 2,   # Reagendar Portabilidade -> pendencia_sms_portabilidade
-    "6": 2,   # Portabilidade Pendente -> pendencia_sms_portabilidade
-    
-    # Entrega
-    "14": 3,  # Aguardando Retirada -> aviso_retirada_correios_v1
-    "RETIRADA CORREIOS": 3,        # -> aviso_retirada_correios_v1
-    "AGUARDANDO RETIRADA": 3,      # -> aviso_retirada_correios_v1
-    
-    # Confirmação de endereço
-    "43": 4,  # Endereço Incorreto -> confirmacao_endereco_v1
-    "ENDERECO INCORRETO": 4,       # -> confirmacao_endereco_v1
-    
+    "CONFIRMACAO BP": 1,
+    "LIBERACAO BONUS": 1,
+    "PENDENTE": 2,
+    "PENDENCIA SMS": 2,
+    "PENDENCIA_SMS": 2,
+    "RETIRADA CORREIOS": 3,
+    "AGUARDANDO RETIRADA": 3,
+    "CONFIRMACAO ENDERECO": 4,
+    "ENDERECO INCORRETO": 4,
+    "PENDENCIA SMS V2": 5,
+    "PORTABILIDADE CONCLUIDA": 6,
+    "CONCLUIDA": 6,
+    "CHIP ENTREGUE": 7,
+    "ENTREGUE SEM ATIVACAO": 7,
+    "CHIP SAIU ENTREGA": 8,
+    "EM ROTA": 8,
+    "SAIU ENTREGA": 8,
+
+    # Tipos numéricos legado
+    "3_LEGADO": 1,   # Portabilidade Concluída (legado) -> confirma
+    "14": 3,         # Aguardando Retirada -> aviso_retirada_correios
+    "43": 4,         # Endereço Incorreto -> confirmacao_endereco
+
     # Não enviar - sem template
     "NÃO ENVIAR": None,
     "NAO ENVIAR": None,

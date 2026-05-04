@@ -196,6 +196,7 @@ class CSVParser:
         """
         Parse de arquivo Excel com estrutura Siebel (portabilidade).
         Aceita mesma estrutura do CSV: Cpf, Número de acesso, Código externo, etc.
+        Suporta .xlsx (openpyxl) e .xls legado (xlrd).
         """
         import pandas as pd
 
@@ -203,7 +204,23 @@ class CSVParser:
         if not path.exists():
             raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
 
-        df = pd.read_excel(file_path, engine='openpyxl', dtype=str)
+        # Escolher engine conforme extensão
+        ext = path.suffix.lower()
+        if ext == '.xls':
+            try:
+                df = pd.read_excel(file_path, engine='xlrd', dtype=str)
+            except Exception:
+                # Fallback: alguns .xls são na verdade HTML/XML renomeados
+                try:
+                    df = pd.read_html(file_path)[0].astype(str)
+                except Exception as e2:
+                    raise ValueError(
+                        f"Não foi possível ler o arquivo .xls '{path.name}'. "
+                        f"Tente salvar como .xlsx no Excel. Erro: {e2}"
+                    )
+        else:
+            df = pd.read_excel(file_path, engine='openpyxl', dtype=str)
+
         headers = [str(c) for c in df.columns]
         mapeamento = cls._mapear_cabecalhos_flexivel(headers)
 

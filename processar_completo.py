@@ -255,7 +255,17 @@ def detectar_tipo_arquivo_por_cabecalho(arquivo: Path) -> str:
 
         if arquivo.suffix.lower() in ('.xlsx', '.xls'):
             import pandas as pd
-            df = pd.read_excel(arquivo, engine='openpyxl', nrows=1)
+            _engine = 'openpyxl' if arquivo.suffix.lower() == '.xlsx' else 'xlrd'
+            try:
+                df = pd.read_excel(arquivo, engine=_engine, nrows=1)
+            except Exception:
+                # Fallback: tentar o outro engine
+                _engine_fb = 'xlrd' if _engine == 'openpyxl' else 'openpyxl'
+                try:
+                    df = pd.read_excel(arquivo, engine=_engine_fb, nrows=1)
+                except Exception as e_fb:
+                    logger.debug(f"Não foi possível ler cabeçalho de {arquivo.name}: {e_fb}")
+                    return 'desconhecido'
             colunas_norm = [_normalizar_coluna(c) for c in df.columns]
             cols_set = set(colunas_norm)
             headers_excel = [str(c) for c in df.columns]
