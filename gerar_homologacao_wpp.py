@@ -87,7 +87,7 @@ elif _os.environ.get('QIGGER_FORCAR_V2') == '1' and DB_V2_PATH:
 OUTPUT_HOMOLOGACAO.parent.mkdir(parents=True, exist_ok=True)
 
 # Limite de dias para geração (apenas últimos N dias)
-DIAS_LIMITE_HOMOLOGACAO = 90
+DIAS_LIMITE_HOMOLOGACAO = 55
 
 # Palavras a ignorar ao extrair primeiro e último nome
 PALAVRAS_IGNORAR = {'e', 'de', 'da', 'do', 'das', 'dos', 'em', 'na', 'no', 'nas', 'nos'}
@@ -838,6 +838,80 @@ def substituir_variaveis_mensagem(corpo_mensagem: str, variaveis: Dict[str, str]
     return mensagem
 
 
+# =============================================================================
+# DERIVAÇÃO DE TEMPLATE PARA DADOS V2
+# (V2 não tem tipo_mensagem — derivar a partir de acao_a_realizar + status)
+# =============================================================================
+
+def derivar_template_v2(row_dict: dict) -> int:
+    """
+    Deriva o IDCorpo (1-8) a partir dos campos do V2.
+
+    Regras (em ordem de prioridade):
+    1. status_logistica contém 'AGUARDANDO RETIRADA' / 'AG RETIRADA'  → 3
+    2. status_logistica contém 'EM ROTA' / 'SAIU ENTREGA'             → 8
+    3. status_logistica contém 'ENTREGUE' sem ativação TIM            → 7
+    4. status_tim preenchido (linha ativa)                            → 6
+    5. acao_a_realizar = 'REABERTURA' / 'ENVIO GERENCIADOR'           → 1
+    6. acao_a_realizar = 'POS VENDA PARABENIZAÇÃO' / 'BOAS VINDAS'    → 6
+    7. acao_a_realizar = 'PARABENIZAÇÃO BP'                           → 1
+    8. acao_a_realizar = 'INCENTIVO NOVA LINHA'                       → 1
+    9. acao_a_realizar = 'VALIDAR GROSS'                              → 1
+    10. status_bilhete contém 'PENDENTE' / 'AGUARDANDO'               → 2
+    11. status_venda = 'APROVADA' (fallback)                          → 1
+    Retorna 0 se não deve enviar (cancelado, sem ação, etc.)
+    """
+    acao = str(row_dict.get('acao_a_realizar') or '').strip().upper()
+    status_log = str(row_dict.get('status_logistica') or '').strip().upper()
+    status_venda = str(row_dict.get('status_venda') or '').strip().upper()
+    status_tim = str(row_dict.get('status_tim') or '').strip().upper()
+    status_bilhete = str(row_dict.get('status_bilhete') or '').strip().upper()
+    status_pedido = str(row_dict.get('status_pedido') or '').strip().upper()
+
+    # Não enviar para cancelados
+    if status_venda in ('CANCELADA', 'CANCELADO', 'REJEITADA', 'REJEITADO'):
+        return 0
+    if acao in ('CANCELADO A PEDIDO CLIENTE', 'NAO ENVIAR', 'NÃO ENVIAR', 'DEFINIR AÇÃO'):
+        return 0
+
+    # Logística: aguardando retirada nos Correios
+    if any(x in status_log for x in ('AG RETIRADA', 'AGUARDANDO RETIRADA', 'OBJETO AGUARDANDO')):
+        return 3
+
+    # Logística: chip saiu para entrega
+    if any(x in status_log for x in ('EM ROTA', 'SAIU ENTREGA', 'EM TRANSITO', 'ENVIADO')):
+        return 8
+
+    # Logística: entregue mas sem ativação TIM
+    if 'ENTREGUE' in status_log and not status_tim:
+        return 7
+
+    # TIM ativa: portabilidade concluída
+    if status_tim and status_tim not in ('', 'NONE', 'NULL'):
+        return 6
+
+    # Ações que mapeiam para template 1 (confirmação/envio)
+    if acao in (
+        'REABERTURA', 'ENVIO GERENCIADOR', 'PARABENIZAÇÃO BP',
+        'INCENTIVO NOVA LINHA', 'VALIDAR GROSS', 'BOAS VINDAS',
+    ):
+        return 1
+
+    # Pós-venda / parabenização → concluída
+    if acao in ('POS VENDA PARABENIZAÇÃO', 'PARABENIZACAO', 'PARABENIZAÇÃO'):
+        return 6
+
+    # Bilhete pendente → pendência SMS
+    if any(x in status_bilhete for x in ('PENDENTE', 'AGUARDANDO', 'VALIDACAO')):
+        return 2
+
+    # Aprovada sem ação específica → template 1 (confirmação)
+    if status_venda == 'APROVADA':
+        return 1
+
+    return 0
+
+
 # Mensagens padrão dos templates (caso não estejam no banco)
 MENSAGENS_PADRAO = {
     1: """Olá! A sua solicitação de portabilidade para a TIM foi processada com sucesso.  Para autorizar o envio do chip e a continuidade do processo, é necessária a confirmação do titular.  Realize a validação de uma das formas abaixo:  Toque no botão Confirmar Solicitação; ou Envie SMS com a palavra SIM para o número 7678.  Dados da Entrega:  Prazo estimado: Até 10 dias úteis. Recebimento: Necessário maior de 18 anos com documento. Observação: O chip será entregue com número provisório até a conclusão da portabilidade.  Status: Aguardando confirmação.""",
@@ -1340,11 +1414,24 @@ def gerar_arquivo_homologacao():
                 acao_a_realizar=str(row_dict.get('acao_a_realizar', '') or '').strip(),
             )
             
-            # Preencher dados adicionais de base_coverte_prop se disponíveis
-            if row_dict.get('cliente_nome'):
-                record.nome_cliente = str(row_dict['cliente_nome']).strip() if row_dict.get('cliente_nome') else ''
-            if row_dict.get('telefone_portado'):
-                record.telefone_contato = str(row_dict['telefone_portado']).strip()
+            # Preencher dados adicionais — suporta tanto legado (cliente_nome/telefone_portado)
+            # quanto V2 (nome_cliente/numero_acesso/telefone_portabilidade)
+            nome_raw = (
+                row_dict.get('nome_cliente')
+                or row_dict.get('cliente_nome')
+                or ''
+            )
+            if nome_raw:
+                record.nome_cliente = str(nome_raw).strip()
+
+            telefone_raw = (
+                row_dict.get('telefone_portabilidade')
+                or row_dict.get('telefone_portado')
+                or row_dict.get('numero_acesso')
+                or ''
+            )
+            if telefone_raw:
+                record.telefone_contato = str(telefone_raw).strip()
             if row_dict.get('data_venda'):
                 try:
                     from datetime import datetime as dt_parser
@@ -1724,9 +1811,20 @@ def gerar_arquivo_homologacao():
             }
             
             # Obter informações do template
+            # Para V2: tipo_mensagem é NULL → derivar a partir de acao_a_realizar + status
             template_info = TemplateMapper.get_template_for_record(record)
             template_id = template_info.get('template_id')
-            
+
+            if not template_id and _usou_v2:
+                # Derivar IDCorpo a partir dos campos V2
+                template_id = derivar_template_v2(row_dict)
+                if template_id == 0:
+                    pbar.update(1)
+                    continue
+                # Atualizar record com o template derivado
+                record.tipo_mensagem = str(template_id)
+                record.template = str(template_id)
+
             if not template_id:
                 pbar.update(1)
                 continue
@@ -1768,9 +1866,14 @@ def gerar_arquivo_homologacao():
             data_venda_formatada = normalizar_data_venda(record.data_venda)
             
             # Tipo_Comunicacao: usar Template_Triggers, substituir "EM CRIAÇÃO" por "1"
+            # Para V2: record.template já foi setado com o template_id derivado
             template_triggers = record.template or ''
             tipo_comunicacao = template_triggers
-            if template_triggers.upper() in ['EM CRIAÇÃO', 'EM CRIACAO', 'EM_CRIACAO']:
+            if not tipo_comunicacao and _usou_v2:
+                # V2 sem template original — usar o template_id derivado
+                tipo_comunicacao = str(template_id)
+                template_triggers = str(template_id)
+            if tipo_comunicacao.upper() in ['EM CRIAÇÃO', 'EM CRIACAO', 'EM_CRIACAO']:
                 tipo_comunicacao = '1'
             
             # Converter tipo_comunicacao para int para verificação de histórico
@@ -1862,10 +1965,9 @@ def gerar_arquivo_homologacao():
                 'Ponto_Referencia': endereco_data['ponto_referencia'] or '',
                 'Cod_Rastreio': link_rastreio or '',
                 'Data_Venda': data_venda_formatada,
-                'Data_Conectada': data_conectada_formatada,
                 'Tipo_Comunicacao': tipo_comunicacao,
-                'Status_Disparo': 'FALSE',  # Sempre FALSE
-                'DataHora_Disparo': '',  # Sempre vazio
+                'Status_Disparo': 'FALSE',
+                'DataHora_Disparo': '',
             }
             
             # Colunas de homologação ao final (conforme solicitado)
@@ -1917,7 +2019,7 @@ def gerar_arquivo_homologacao():
     colunas_principais = [
         'Proposta_iSize', 'Cpf', 'NomeCliente', 'Telefone_Contato',
         'Endereco', 'Numero', 'Complemento', 'Bairro', 'Cidade', 'UF', 'Cep', 'Ponto_Referencia',
-        'Cod_Rastreio', 'Data_Venda', 'Data_Conectada', 'Tipo_Comunicacao',
+        'Cod_Rastreio', 'Data_Venda', 'Tipo_Comunicacao',
         'Status_Disparo', 'DataHora_Disparo'
     ]
     colunas_homologacao = [

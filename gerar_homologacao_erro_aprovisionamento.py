@@ -81,7 +81,7 @@ def main():
     
     # [2] Buscar registros com erro no aprovisionamento sincronizando todas as tabelas
     print("[2] Buscando registros com erro no aprovisionamento (sincronizando todas as tabelas)...")
-    DIAS_LIMITE = 90
+    DIAS_LIMITE = 55
     data_limite = (datetime.now() - timedelta(days=DIAS_LIMITE)).strftime('%Y-%m-%d')
     filtro_data_sql = ">= '" + data_limite + "'"
     print(f"    >> Filtro: últimos {DIAS_LIMITE} dias (a partir de {data_limite}) | Ordenação: mais recente primeiro")
@@ -485,8 +485,9 @@ def main():
                 pbar.update(1)
                 continue
             
-            # Regra unificada: só incluir se tiver ALGUM histórico de entrega (ro_* ou Relatório de Objetos)
+            # Regra unificada: só incluir se tiver ALGUM histórico de entrega (ro_* ou V2 ou Relatório de Objetos)
             tem_historico_entrega = False
+            # Campos legado (prefixo ro_)
             if record_dict.get('ro_nu_pedido') or record_dict.get('ro_rastreio'):
                 tem_historico_entrega = True
             if not tem_historico_entrega and record_dict.get('ro_status_entrega'):
@@ -499,6 +500,22 @@ def main():
                 iccid_str = str(record_dict.get('ro_iccid') or '').strip()
                 if iccid_str and iccid_str.lower() != 'nan':
                     tem_historico_entrega = True
+            # Campos V2 (sem prefixo ro_)
+            if not tem_historico_entrega and record_dict.get('nu_pedido'):
+                tem_historico_entrega = True
+            if not tem_historico_entrega and record_dict.get('iccid'):
+                iccid_v2 = str(record_dict.get('iccid') or '').strip()
+                if iccid_v2 and iccid_v2.lower() not in ('nan', 'none', ''):
+                    tem_historico_entrega = True
+            if not tem_historico_entrega and record_dict.get('status_entrega'):
+                tem_historico_entrega = True
+            if not tem_historico_entrega and record_dict.get('ultima_ocorrencia'):
+                tem_historico_entrega = True
+            if not tem_historico_entrega and record_dict.get('data_entrega'):
+                tem_historico_entrega = True
+            # Fallback: se veio do V2 e tem numero_acesso, incluir mesmo sem logística
+            if not tem_historico_entrega and _usou_v2 and record.numero_acesso:
+                tem_historico_entrega = True
             if not tem_historico_entrega and objects_loader:
                 obj_match = objects_loader.find_best_match(
                     codigo_externo=record.codigo_externo,
