@@ -128,6 +128,7 @@ FROM priorizado;
 -- =====================================================================
 -- VIEW PRINCIPAL
 -- =====================================================================
+DROP VIEW IF EXISTS vw_vendas_layout_final;
 CREATE OR REPLACE VIEW vw_vendas_layout_final AS
 WITH
 
