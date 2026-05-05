@@ -886,8 +886,12 @@ def derivar_template_v2(row_dict: dict) -> int:
     if 'ENTREGUE' in status_log and not status_tim:
         return 7
 
-    # TIM ativa: portabilidade concluída
-    if status_tim and status_tim not in ('', 'NONE', 'NULL'):
+    # TIM ativa: portabilidade concluída — apenas status que confirmam linha ativa
+    if status_tim in (
+        'ATIVA', 'ATIVO', 'ATIVADA', 'ATIVADO',
+        'APROVISIONADO',
+        'CONFIRMADO PELA DOADORA',
+    ):
         return 6
 
     # Ações que mapeiam para template 1 (confirmação/envio)
@@ -901,9 +905,11 @@ def derivar_template_v2(row_dict: dict) -> int:
     if acao in ('POS VENDA PARABENIZAÇÃO', 'PARABENIZACAO', 'PARABENIZAÇÃO'):
         return 6
 
-    # Bilhete pendente → pendência SMS
+    # Bilhete pendente → pendência SMS (alterna entre 2 e 5)
     if any(x in status_bilhete for x in ('PENDENTE', 'AGUARDANDO', 'VALIDACAO')):
-        return 2
+        # Usar template 5 se já houve tentativa anterior (status_venda APROVADA),
+        # senão template 2
+        return 5 if status_venda == 'APROVADA' else 2
 
     # Aprovada sem ação específica → template 1 (confirmação)
     if status_venda == 'APROVADA':
@@ -1819,6 +1825,12 @@ def gerar_arquivo_homologacao():
                 # Derivar IDCorpo a partir dos campos V2
                 template_id = derivar_template_v2(row_dict)
                 if template_id == 0:
+                    pbar.update(1)
+                    continue
+                # WPP apenas para clientes com número portado
+                # No V2: numero_acesso = bu.telefone_portabilidade (número portado)
+                tel_port = str(row_dict.get('numero_acesso') or '').strip()
+                if not tel_port or tel_port in ('', '-', '00000000000', 'None', 'null'):
                     pbar.update(1)
                     continue
                 # Atualizar record com o template derivado
