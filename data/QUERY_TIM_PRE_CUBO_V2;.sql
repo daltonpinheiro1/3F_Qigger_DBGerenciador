@@ -1039,3 +1039,8 @@ LEFT JOIN (
 WHERE try_strptime(NULLIF(u."Data da venda", ''), '%d/%m/%Y') >= DATE '2026-04-01'
   AND try_strptime(NULLIF(u."Data da venda", ''), '%d/%m/%Y') <=  DATE '2026-04-30'
 ORDER BY try_strptime(NULLIF(u."Data da venda", ''), '%d/%m/%Y') ASC;
+
+-- =====================================================================
+-- EXIBIR RESULTADO NA TELA
+-- =====================================================================
+SELECT * FROM vw_vendas_layout_final;
