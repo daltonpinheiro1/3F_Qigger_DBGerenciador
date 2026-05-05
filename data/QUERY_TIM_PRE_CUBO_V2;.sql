@@ -1031,9 +1031,23 @@ SELECT
         THEN u."__Data Emissao Excel"
         ELSE u."Data da venda"
     END                                  AS "DATA EMISSÃO",
-    -- Vendedor e Supervisor: do EVA (SQLSERVER) ou vazio para outras origens
-    coalesce(nullif(trim(u."__Nome Vendedor"), ''), '')  AS "RESPONSAVEL_VENDEDOR",
-    coalesce(nullif(trim(u."__Supervisor"), ''), '')     AS "SUPERVISOR",
+    -- Vendedor e Supervisor: do EVA (SQLSERVER) ou "Bot Enriquecimento" para outras origens
+    CASE
+        WHEN u."Origem Registro" = 'SQLSERVER'
+             AND coalesce(nullif(trim(u."__Nome Vendedor"), ''), '') <> ''
+        THEN upper(trim(u."__Nome Vendedor"))
+        WHEN u."Origem Registro" IN ('PLANILHA', 'DUCKDB')
+        THEN 'Bot Enriquecimento'
+        ELSE coalesce(nullif(trim(u."__Nome Vendedor"), ''), 'Bot Enriquecimento')
+    END                                  AS "RESPONSAVEL_VENDEDOR",
+    CASE
+        WHEN u."Origem Registro" = 'SQLSERVER'
+             AND coalesce(nullif(trim(u."__Supervisor"), ''), '') <> ''
+        THEN upper(trim(u."__Supervisor"))
+        WHEN u."Origem Registro" IN ('PLANILHA', 'DUCKDB')
+        THEN 'Bot Enriquecimento'
+        ELSE coalesce(nullif(trim(u."__Supervisor"), ''), 'Bot Enriquecimento')
+    END                                  AS "SUPERVISOR",
     CASE
         WHEN u."Origem Registro" = 'SQLSERVER' THEN 'OPERACAO'
         WHEN u."Origem Registro" = 'PLANILHA' THEN 'ENRIQUECIMENTO'
