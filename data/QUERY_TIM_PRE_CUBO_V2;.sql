@@ -965,11 +965,13 @@ SELECT
     CASE
         WHEN coalesce(trim(u."Data de nascimento"), '') = '' THEN ''
         WHEN try_strptime(u."Data de nascimento", '%d/%m/%Y') IS NOT NULL
-        THEN u."Data de nascimento"
+        THEN strftime(try_strptime(u."Data de nascimento", '%d/%m/%Y'), '%d/%m/%Y')
         WHEN try_strptime(u."Data de nascimento", '%Y-%m-%d') IS NOT NULL
         THEN strftime(try_strptime(u."Data de nascimento", '%Y-%m-%d'), '%d/%m/%Y')
         WHEN try_strptime(u."Data de nascimento", '%d/%m/%Y %H:%M:%S') IS NOT NULL
         THEN strftime(try_strptime(u."Data de nascimento", '%d/%m/%Y %H:%M:%S'), '%d/%m/%Y')
+        WHEN try_strptime(u."Data de nascimento", '%Y-%m-%d %H:%M:%S') IS NOT NULL
+        THEN strftime(try_strptime(u."Data de nascimento", '%Y-%m-%d %H:%M:%S'), '%d/%m/%Y')
         ELSE u."Data de nascimento"
     END                                  AS "Aniversario",
     u."Nome da mãe"                      AS "[Nome Mae]",
@@ -982,7 +984,20 @@ SELECT
     NULL                                 AS "[GB Score]",
     NULL                                 AS "[GB Bonus]",
     NULL                                 AS "[GB Total]",
-    u."Data de vencimento da fatura"     AS "[Data Vencimento]",
+    -- Data Vencimento: apenas o dia (DD) — ex: "15"
+    CASE
+        WHEN coalesce(trim(u."Data de vencimento da fatura"), '') = '' THEN ''
+        -- Já é só o dia (1 ou 2 dígitos)
+        WHEN regexp_matches(trim(u."Data de vencimento da fatura"), '^\d{1,2}$')
+        THEN lpad(trim(u."Data de vencimento da fatura"), 2, '0')
+        -- Formato dd/mm/aaaa → extrair dia
+        WHEN try_strptime(u."Data de vencimento da fatura", '%d/%m/%Y') IS NOT NULL
+        THEN strftime(try_strptime(u."Data de vencimento da fatura", '%d/%m/%Y'), '%d')
+        -- Formato aaaa-mm-dd → extrair dia
+        WHEN try_strptime(u."Data de vencimento da fatura", '%Y-%m-%d') IS NOT NULL
+        THEN strftime(try_strptime(u."Data de vencimento da fatura", '%Y-%m-%d'), '%d')
+        ELSE trim(u."Data de vencimento da fatura")
+    END                                  AS "[Data Vencimento]",
     u."Tipo do pagamento"                AS "[Forma Pagamento]",
     u."Referência"                       AS "[Endereco Principal]",
     'BRASIL'                             AS "Pais",
