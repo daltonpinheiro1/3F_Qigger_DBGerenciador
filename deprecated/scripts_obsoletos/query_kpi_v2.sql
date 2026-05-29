@@ -13,11 +13,17 @@
 -- [FIX-3] GROSS dates: trata dd/mm/yyyy e yyyy-mm-dd via helper SAFE_DATE
 -- [FIX-4] Data_Entrega fallback: todas as datas normalizadas via SAFE_DATE
 -- [FIX-5] Status_Resposta_Envio_Pedido: "PENDENTE" → "PENDENTE CRIVO" vs "PENDENTE"
+-- [FIX-6] GROSS: cascata multi-chave usando tabela gross + consulta_siebel
+--         Associação: proposta_isize → numero_portado → numero_linha → acesso_tim → iccid
+--         + consulta_siebel por proposta_isize → numero_acesso → CPF
+--         Impacto: de ~910 para ~2.500+ propostas com GROSS identificado
 -- [NEW-1] Ciclo_Logistico: classificação completa do ciclo de vida logístico
 -- [NEW-2] Dias_Em_Rota: dias desde envio até entrega ou hoje
 -- [NEW-3] SLA_Status: classificação de cumprimento de SLA
 -- [NEW-4] Em_Rota_SIM_NAO agora usa Ciclo_Logistico como base
 -- [NEW-5] Status_Entrega mais granular via Ciclo_Logistico
+-- [NEW-6] GROSS_Encontrado_Por: rastreabilidade da chave usada para associação
+-- [NEW-7] Classificacao_CR: classificação CR da tabela gross
 -- =============================================================================
 
 WITH
@@ -296,10 +302,22 @@ base AS (
         bo.detalhe_status,
         bo.data_envio_chip,
         -- Gross flag inline (para uso no cálculo de status_resposta_envio_pedido)
-        (SELECT MAX(CASE WHEN UPPER(TRIM(cs2.status_ordem)) IN ('CONCLUÍDO', 'CONCLUIDO', 'CONCLUíDO',
-            'PORTABILIDADE PENDENTE', 'PENDENTE PORTABILIDADE') THEN 1 ELSE 0 END)
-         FROM consulta_siebel cs2 WHERE cs2.proposta_isize = prop.proposta_isize
-        ) AS gross_flag_inline,
+        -- [FIX-6] Agora usa cascata: consulta_siebel por proposta_isize OU tabela gross
+        CASE
+            WHEN (SELECT MAX(CASE WHEN UPPER(TRIM(cs2.status_ordem)) IN ('CONCLUÍDO', 'CONCLUIDO', 'CONCLUíDO',
+                'PORTABILIDADE PENDENTE', 'PENDENTE PORTABILIDADE') THEN 1 ELSE 0 END)
+                 FROM consulta_siebel cs2 WHERE cs2.proposta_isize = prop.proposta_isize) = 1
+            THEN 1
+            WHEN EXISTS (SELECT 1 FROM gross g2 WHERE g2.proposta_isize = prop.proposta_isize AND g2.proposta_isize != '')
+            THEN 1
+            WHEN port.numero_linha IS NOT NULL AND port.numero_linha != ''
+             AND EXISTS (SELECT 1 FROM gross g3 WHERE g3.acesso = port.numero_linha AND g3.acesso != '')
+            THEN 1
+            WHEN port.telefone_portabilidade IS NOT NULL AND port.telefone_portabilidade != ''
+             AND EXISTS (SELECT 1 FROM gross g4 WHERE g4.acesso = port.telefone_portabilidade AND g4.acesso != '')
+            THEN 1
+            ELSE 0
+        END AS gross_flag_inline,
         -- [NEW] Flag auxiliar: tem QUALQUER dado de logística/envio?
         -- Usado para distinguir "sem envio" de "enviado sem rastreio"
         CASE
@@ -757,14 +775,46 @@ status_calc AS (
 ),
 
 -- ============================================================
--- 16. GROSS E BP FLAGS (via consulta_siebel + portabilidade_tim)
+-- 16. GROSS E BP FLAGS — CASCATA MULTI-CHAVE
+-- [FIX-6] GROSS agora usa cascata: tabela gross (proposta_isize → numero_portado
+--         → numero_linha → acesso_temporario_tim) + consulta_siebel (proposta_isize
+--         → numero_acesso=tel_port → numero_acesso=num_linha → cpf)
 -- [FIX-3] data_gross: trata dd/mm/yyyy e yyyy-mm-dd via inline CASE
 -- Regra BP: exclusivo para PORTABILIDADE
---   - status_bilhete IN (Portado, Falha Parcial, Antigo) → SIM
---   - status_bilhete IN (Portabilidade Pendente, Pendente Portabilidade) → PENDENTE
---   - Caso contrário → NÃO
 -- ============================================================
-gross_bp AS (
+
+-- 16A. GROSS DIRETO (tabela gross — fonte primária: arquivo 3F GROSS)
+gross_por_isize AS (
+    SELECT proposta_isize, data_gross, classificacao_cr
+    FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY proposta_isize ORDER BY versao DESC) AS rn
+        FROM gross
+        WHERE proposta_isize IS NOT NULL AND proposta_isize != ''
+    ) WHERE rn = 1
+),
+
+-- GROSS por acesso (deduplicado por acesso, versão mais recente)
+gross_por_acesso AS (
+    SELECT acesso, data_gross, classificacao_cr
+    FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY acesso ORDER BY versao DESC) AS rn
+        FROM gross
+        WHERE acesso IS NOT NULL AND acesso != ''
+    ) WHERE rn = 1
+),
+
+-- GROSS por ICCID (deduplicado por iccid, versão mais recente)
+gross_por_iccid AS (
+    SELECT iccid, data_gross, classificacao_cr
+    FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY iccid ORDER BY versao DESC) AS rn
+        FROM gross
+        WHERE iccid IS NOT NULL AND iccid != ''
+    ) WHERE rn = 1
+),
+
+-- 16B. GROSS VIA CONSULTA_SIEBEL (fonte secundária — status_ordem)
+gross_siebel AS (
     SELECT
         proposta_isize,
         -- GROSS Sim: Concluído, Portabilidade Pendente, Pendente Portabilidade
@@ -817,6 +867,159 @@ gross_bp AS (
             THEN 1 ELSE 0 END) AS bp_cancelado_siebel_flag
     FROM consulta_siebel
     GROUP BY proposta_isize
+),
+
+-- Siebel agrupado por numero_acesso (para match por telefone/linha)
+gross_siebel_por_acesso AS (
+    SELECT
+        numero_acesso,
+        MAX(CASE WHEN UPPER(TRIM(status_ordem)) IN ('CONCLUÍDO', 'CONCLUIDO', 'CONCLUíDO',
+            'PORTABILIDADE PENDENTE', 'PENDENTE PORTABILIDADE') THEN 1 ELSE 0 END) AS gross_flag,
+        MIN(CASE WHEN UPPER(TRIM(status_ordem)) IN ('CONCLUÍDO', 'CONCLUIDO', 'CONCLUíDO',
+            'PORTABILIDADE PENDENTE', 'PENDENTE PORTABILIDADE')
+            THEN DATE(CASE
+                WHEN COALESCE(data_conclusao_ordem, '') LIKE '__/__/____'
+                THEN SUBSTR(data_conclusao_ordem,7,4)||'-'||SUBSTR(data_conclusao_ordem,4,2)||'-'||SUBSTR(data_conclusao_ordem,1,2)
+                WHEN COALESCE(data_conclusao_ordem, '') <> '' THEN data_conclusao_ordem
+                ELSE created_at
+            END) END) AS data_gross,
+        MAX(CASE WHEN UPPER(TRIM(status_ordem)) = 'ERRO NO APROVISIONAMENTO' THEN 1 ELSE 0 END) AS erro_apv_flag,
+        MAX(CASE WHEN UPPER(TRIM(status_ordem)) = 'EM APROVISIONAMENTO' THEN 1 ELSE 0 END) AS em_apv_flag,
+        MAX(CASE WHEN TRIM(COALESCE(status_ordem, '')) != '' THEN 1 ELSE 0 END) AS tem_status_flag,
+        -- BP flags por acesso
+        MAX(CASE WHEN UPPER(TRIM(status_bilhete)) IN ('PORTADO', 'FALHA PARCIAL') THEN 1 ELSE 0 END) AS bp_siebel_flag,
+        MIN(CASE WHEN UPPER(TRIM(status_bilhete)) IN ('PORTADO', 'FALHA PARCIAL')
+            THEN DATE(CASE
+                WHEN COALESCE(data_portabilidade, '') LIKE '__/__/____'
+                THEN SUBSTR(data_portabilidade,7,4)||'-'||SUBSTR(data_portabilidade,4,2)||'-'||SUBSTR(data_portabilidade,1,2)
+                WHEN COALESCE(data_portabilidade, '') <> '' THEN data_portabilidade
+                ELSE created_at
+            END) END) AS data_bp_siebel,
+        MAX(CASE WHEN UPPER(TRIM(status_bilhete)) IN ('PORTABILIDADE PENDENTE', 'PENDENTE PORTABILIDADE') THEN 1 ELSE 0 END) AS bp_pendente_siebel_flag,
+        MAX(CASE WHEN UPPER(TRIM(status_bilhete)) = 'CONFLITO' THEN 1 ELSE 0 END) AS bp_conflito_siebel_flag,
+        MAX(CASE WHEN UPPER(TRIM(status_bilhete)) IN ('PORTABILIDADE CANCELADA', 'PORTABILIDADE SUSPENSA', 'CANCELAMENTO PENDENTE') THEN 1 ELSE 0 END) AS bp_cancelado_siebel_flag
+    FROM consulta_siebel
+    WHERE numero_acesso IS NOT NULL AND numero_acesso != ''
+    GROUP BY numero_acesso
+),
+
+-- 16C. GROSS UNIFICADO — consolida cascata em uma única CTE por proposta
+-- Prioridade: 1) gross.proposta_isize → 2) gross.acesso=tel_port → 3) gross.acesso=num_linha
+--             → 4) gross.acesso=acesso_tim → 5) gross.iccid=iccid_ult
+--             → 6) siebel.proposta_isize
+--             → 7) siebel.numero_acesso=tel_port → 8) siebel.numero_acesso=num_linha
+gross_bp AS (
+    SELECT
+        s.id_isize AS proposta_isize,
+        -- GROSS FLAG: cascata de fontes
+        CASE
+            WHEN gi.proposta_isize IS NOT NULL THEN 1
+            WHEN ga_tel.acesso IS NOT NULL THEN 1
+            WHEN ga_lin.acesso IS NOT NULL THEN 1
+            WHEN ga_tim.acesso IS NOT NULL THEN 1
+            WHEN ga_iccid.iccid IS NOT NULL THEN 1
+            WHEN COALESCE(gs.gross_flag, 0) = 1 THEN 1
+            WHEN COALESCE(gsa_tel.gross_flag, 0) = 1 THEN 1
+            WHEN COALESCE(gsa_lin.gross_flag, 0) = 1 THEN 1
+            ELSE 0
+        END AS gross_flag,
+        -- DATA GROSS: cascata (normalizar dd/mm/yyyy da tabela gross)
+        COALESCE(
+            DATE(CASE
+                WHEN COALESCE(gi.data_gross, '') LIKE '__/__/____'
+                THEN SUBSTR(gi.data_gross,7,4)||'-'||SUBSTR(gi.data_gross,4,2)||'-'||SUBSTR(gi.data_gross,1,2)
+                ELSE gi.data_gross END),
+            DATE(CASE
+                WHEN COALESCE(ga_tel.data_gross, '') LIKE '__/__/____'
+                THEN SUBSTR(ga_tel.data_gross,7,4)||'-'||SUBSTR(ga_tel.data_gross,4,2)||'-'||SUBSTR(ga_tel.data_gross,1,2)
+                ELSE ga_tel.data_gross END),
+            DATE(CASE
+                WHEN COALESCE(ga_lin.data_gross, '') LIKE '__/__/____'
+                THEN SUBSTR(ga_lin.data_gross,7,4)||'-'||SUBSTR(ga_lin.data_gross,4,2)||'-'||SUBSTR(ga_lin.data_gross,1,2)
+                ELSE ga_lin.data_gross END),
+            DATE(CASE
+                WHEN COALESCE(ga_tim.data_gross, '') LIKE '__/__/____'
+                THEN SUBSTR(ga_tim.data_gross,7,4)||'-'||SUBSTR(ga_tim.data_gross,4,2)||'-'||SUBSTR(ga_tim.data_gross,1,2)
+                ELSE ga_tim.data_gross END),
+            DATE(CASE
+                WHEN COALESCE(ga_iccid.data_gross, '') LIKE '__/__/____'
+                THEN SUBSTR(ga_iccid.data_gross,7,4)||'-'||SUBSTR(ga_iccid.data_gross,4,2)||'-'||SUBSTR(ga_iccid.data_gross,1,2)
+                ELSE ga_iccid.data_gross END),
+            gs.data_gross,
+            gsa_tel.data_gross,
+            gsa_lin.data_gross
+        ) AS data_gross,
+        -- CLASSIFICACAO CR (da tabela gross)
+        COALESCE(gi.classificacao_cr, ga_tel.classificacao_cr, ga_lin.classificacao_cr, ga_tim.classificacao_cr, ga_iccid.classificacao_cr) AS classificacao_cr,
+        -- GROSS_ENCONTRADO_POR: rastreabilidade da associação
+        CASE
+            WHEN gi.proposta_isize IS NOT NULL THEN 'gross.proposta_isize'
+            WHEN ga_tel.acesso IS NOT NULL THEN 'gross.acesso=numero_portado'
+            WHEN ga_lin.acesso IS NOT NULL THEN 'gross.acesso=numero_linha'
+            WHEN ga_tim.acesso IS NOT NULL THEN 'gross.acesso=acesso_tim'
+            WHEN ga_iccid.iccid IS NOT NULL THEN 'gross.iccid'
+            WHEN COALESCE(gs.gross_flag, 0) = 1 THEN 'siebel.proposta_isize'
+            WHEN COALESCE(gsa_tel.gross_flag, 0) = 1 THEN 'siebel.numero_acesso=numero_portado'
+            WHEN COALESCE(gsa_lin.gross_flag, 0) = 1 THEN 'siebel.numero_acesso=numero_linha'
+            ELSE NULL
+        END AS gross_encontrado_por,
+        -- Flags de status (do Siebel — fallback quando gross direto não tem)
+        COALESCE(gs.erro_apv_flag, gsa_tel.erro_apv_flag, gsa_lin.erro_apv_flag, 0) AS erro_apv_flag,
+        COALESCE(gs.em_apv_flag, gsa_tel.em_apv_flag, gsa_lin.em_apv_flag, 0) AS em_apv_flag,
+        COALESCE(gs.cancelado_cliente_sms_flag, 0) AS cancelado_cliente_sms_flag,
+        COALESCE(gs.cancelado_cliente_ambos_flag, 0) AS cancelado_cliente_ambos_flag,
+        COALESCE(gs.tem_status_flag, gsa_tel.tem_status_flag, gsa_lin.tem_status_flag, 0) AS tem_status_flag,
+        -- BP flags (Siebel — cascata)
+        CASE
+            WHEN COALESCE(gs.bp_siebel_flag, 0) = 1 THEN 1
+            WHEN COALESCE(gsa_tel.bp_siebel_flag, 0) = 1 THEN 1
+            WHEN COALESCE(gsa_lin.bp_siebel_flag, 0) = 1 THEN 1
+            ELSE 0
+        END AS bp_siebel_flag,
+        COALESCE(gs.data_bp_siebel, gsa_tel.data_bp_siebel, gsa_lin.data_bp_siebel) AS data_bp_siebel,
+        COALESCE(gs.bp_pendente_siebel_flag, gsa_tel.bp_pendente_siebel_flag, gsa_lin.bp_pendente_siebel_flag, 0) AS bp_pendente_siebel_flag,
+        COALESCE(gs.motivo_recusa_bp, '') AS motivo_recusa_bp,
+        CASE
+            WHEN COALESCE(gs.bp_conflito_siebel_flag, 0) = 1 THEN 1
+            WHEN COALESCE(gsa_tel.bp_conflito_siebel_flag, 0) = 1 THEN 1
+            WHEN COALESCE(gsa_lin.bp_conflito_siebel_flag, 0) = 1 THEN 1
+            ELSE 0
+        END AS bp_conflito_siebel_flag,
+        CASE
+            WHEN COALESCE(gs.bp_cancelado_siebel_flag, 0) = 1 THEN 1
+            WHEN COALESCE(gsa_tel.bp_cancelado_siebel_flag, 0) = 1 THEN 1
+            WHEN COALESCE(gsa_lin.bp_cancelado_siebel_flag, 0) = 1 THEN 1
+            ELSE 0
+        END AS bp_cancelado_siebel_flag
+    FROM status_calc s
+    -- 1. GROSS direto por proposta_isize (tabela gross)
+    LEFT JOIN gross_por_isize gi ON gi.proposta_isize = s.id_isize
+    -- 2. GROSS por acesso = telefone_portabilidade
+    LEFT JOIN gross_por_acesso ga_tel ON ga_tel.acesso = s.tel_port_raw
+        AND gi.proposta_isize IS NULL
+        AND s.tel_port_raw IS NOT NULL AND s.tel_port_raw != ''
+    -- 3. GROSS por acesso = numero_linha
+    LEFT JOIN gross_por_acesso ga_lin ON ga_lin.acesso = s.num_linha_raw
+        AND gi.proposta_isize IS NULL AND ga_tel.acesso IS NULL
+        AND s.num_linha_raw IS NOT NULL AND s.num_linha_raw != ''
+    -- 4. GROSS por acesso = acesso_temporario TIM
+    LEFT JOIN gross_por_acesso ga_tim ON ga_tim.acesso = s.acesso_tim
+        AND gi.proposta_isize IS NULL AND ga_tel.acesso IS NULL AND ga_lin.acesso IS NULL
+        AND s.acesso_tim IS NOT NULL AND s.acesso_tim != ''
+    -- 5. GROSS por ICCID = iccid da logística
+    LEFT JOIN gross_por_iccid ga_iccid ON ga_iccid.iccid = s.iccid_ult
+        AND gi.proposta_isize IS NULL AND ga_tel.acesso IS NULL AND ga_lin.acesso IS NULL AND ga_tim.acesso IS NULL
+        AND s.iccid_ult IS NOT NULL AND s.iccid_ult != ''
+    -- 6. GROSS via consulta_siebel por proposta_isize
+    LEFT JOIN gross_siebel gs ON gs.proposta_isize = s.id_isize
+    -- 7. GROSS via consulta_siebel por numero_acesso = telefone_portabilidade
+    LEFT JOIN gross_siebel_por_acesso gsa_tel ON gsa_tel.numero_acesso = s.tel_port_raw
+        AND gs.proposta_isize IS NULL
+        AND s.tel_port_raw IS NOT NULL AND s.tel_port_raw != ''
+    -- 8. GROSS via consulta_siebel por numero_acesso = numero_linha
+    LEFT JOIN gross_siebel_por_acesso gsa_lin ON gsa_lin.numero_acesso = s.num_linha_raw
+        AND gs.proposta_isize IS NULL AND gsa_tel.numero_acesso IS NULL
+        AND s.num_linha_raw IS NOT NULL AND s.num_linha_raw != ''
 ),
 
 -- BP flags via portabilidade_tim (ATIVA, FALHA PARCIAL, ANTIGO = fechado)
@@ -1138,6 +1341,10 @@ SELECT
         WHEN COALESCE(gb.gross_flag, 0) = 1 THEN STRFTIME('%d/%m/%Y', gb.data_gross)
         ELSE NULL
     END                                                    AS "Data_GROSS",
+    -- [FIX-6] Rastreabilidade: por qual chave o GROSS foi encontrado
+    gb.gross_encontrado_por                                AS "GROSS_Encontrado_Por",
+    -- [FIX-6] Classificação CR (da tabela gross direta)
+    gb.classificacao_cr                                    AS "Classificacao_CR",
     -- BP Fechado (exclusivo PORTABILIDADE)
     -- Fontes: consulta_siebel (Portado, Falha Parcial) + portabilidade_tim (ATIVA, FALHA PARCIAL, ANTIGO)
     -- Sim: Portado, Falha Parcial, Antigo, Ativo

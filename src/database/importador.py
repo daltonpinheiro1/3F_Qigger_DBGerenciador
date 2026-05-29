@@ -795,9 +795,52 @@ class Importador:
         # 4. Identificar tipo
         try:
             tipo_arquivo = self.identificar_tipo_arquivo(colunas)
-        except ValueError as e:
-            logger.error("Tipo de arquivo não identificado: %s", e)
-            return stats
+        except ValueError:
+            # Fallback: se a identificação falhou, pode ser que o header esteja em
+            # outra linha (ex: GROSS com título na linha 0). Tentar detectar header.
+            ext = Path(caminho).suffix.lower()
+            tipo_arquivo = None
+            if ext in ('.xlsx', '.xls'):
+                engine = 'openpyxl' if ext == '.xlsx' else 'xlrd'
+                try:
+                    df_raw = pd.read_excel(caminho, engine=engine, header=None, dtype=str, keep_default_na=False)
+                    # Procurar em cada linha por assinaturas conhecidas
+                    for idx, row in df_raw.head(10).iterrows():
+                        valores = [str(v).strip() for v in row.values if str(v).strip()]
+                        for tipo_candidato, assinatura in ASSINATURAS_TIPO_ARQUIVO.items():
+                            if all(col in valores for col in assinatura):
+                                logger.info(
+                                    "Cabeçalho detectado na linha %d → tipo=%s",
+                                    idx, tipo_candidato,
+                                )
+                                df = pd.read_excel(
+                                    caminho, engine=engine, header=idx,
+                                    dtype=str, keep_default_na=False,
+                                )
+                                tipo_arquivo = tipo_candidato
+                                stats['total_registros'] = len(df)
+                                colunas = list(df.columns)
+                                break
+                        if tipo_arquivo:
+                            break
+                except Exception as e_fb:
+                    logger.debug("Fallback de detecção de header falhou: %s", e_fb)
+
+            if not tipo_arquivo:
+                # Último recurso: se o nome contém GROSS, forçar como gross
+                if '3F_GROSS' in nome_arquivo.upper() or 'GROSS' in nome_arquivo.upper():
+                    logger.info("Forçando tipo 'gross' pelo nome do arquivo: %s", nome_arquivo)
+                    tipo_arquivo = 'gross'
+                    try:
+                        df = self._ler_arquivo(caminho, tipo_arquivo='gross')
+                        stats['total_registros'] = len(df)
+                        colunas = list(df.columns)
+                    except ValueError as e2:
+                        logger.error("Erro ao reler como GROSS: %s", e2)
+                        return stats
+                else:
+                    logger.error("Tipo de arquivo não identificado para: %s", nome_arquivo)
+                    return stats
 
         stats['tipo_arquivo'] = tipo_arquivo
 
@@ -1235,6 +1278,47 @@ class Importador:
             if custcode and self.validar_proposta_isize(custcode):
                 proposta_isize = custcode
 
+        # 4b. Tentar ICCID → buscar em resultado_gross ou backoffice
+        if not proposta_isize:
+            iccid = lv(row.get('ICCID'))
+            if iccid:
+                with db_manager._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT proposta_isize FROM resultado_gross "
+                        "WHERE iccid = ? ORDER BY versao DESC LIMIT 1",
+                        (iccid,),
+                    )
+                    r = cursor.fetchone()
+                    if r and r[0]:
+                        proposta_isize = str(r[0])
+                    else:
+                        cursor.execute(
+                            "SELECT proposta_isize FROM backoffice "
+                            "WHERE iccid = ? ORDER BY versao DESC LIMIT 1",
+                            (iccid,),
+                        )
+                        r = cursor.fetchone()
+                        if r and r[0]:
+                            proposta_isize = str(r[0])
+                    if not proposta_isize:
+                        cursor.execute(
+                            "SELECT proposta_isize FROM logistica "
+                            "WHERE iccid = ? ORDER BY id DESC LIMIT 1",
+                            (iccid,),
+                        )
+                        r = cursor.fetchone()
+                        if r and r[0]:
+                            proposta_isize = str(r[0])
+
+        # 4c. Tentar CPF_CNPJ → buscar em propostas
+        if not proposta_isize:
+            cpf_raw = lv(row.get('CPF_CNPJ'))
+            if cpf_raw:
+                cpf_norm = self.normalizar_cpf(cpf_raw)
+                if cpf_norm and len(cpf_norm) == 11:
+                    proposta_isize = self.resolver_proposta_isize(cpf_norm, db_manager)
+
         # 5. Tentar PROTOCOLO → consulta_siebel
         if not proposta_isize:
             protocolo = lv(row.get('PROTOCOLO'))
@@ -1278,6 +1362,7 @@ class Importador:
             'data_gross': lv(row.get('DATA')) or lv(row.get('DATA_GROSS')),
             'nome_pdv': lv(row.get('NOME_PDV')),
             'mes': lv(row.get('MES')),
+            'iccid': lv(row.get('ICCID')),
         }, lote_id)
 
     # ====================================================================

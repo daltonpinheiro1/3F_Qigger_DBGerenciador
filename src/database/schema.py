@@ -567,6 +567,7 @@ CREATE TABLE IF NOT EXISTS gross (
     data_gross TEXT,
     nome_pdv TEXT,
     mes TEXT,
+    iccid TEXT,
     versao INTEGER NOT NULL DEFAULT 1,
     lote_importacao_id INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -577,6 +578,7 @@ CREATE TABLE IF NOT EXISTS gross (
 CREATE INDEX IF NOT EXISTS idx_gross_proposta ON gross(proposta_isize);
 CREATE INDEX IF NOT EXISTS idx_gross_proposta_versao ON gross(proposta_isize, acesso, versao DESC);
 CREATE INDEX IF NOT EXISTS idx_gross_acesso ON gross(acesso);
+CREATE INDEX IF NOT EXISTS idx_gross_iccid ON gross(iccid);
 CREATE INDEX IF NOT EXISTS idx_gross_lote ON gross(lote_importacao_id);
 """
 
